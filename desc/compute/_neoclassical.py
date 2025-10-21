@@ -981,11 +981,7 @@ def f_tr1(params, transforms, profiles, data, **kwargs):
     obj_out_test_bump = obj_out
 
     # Normalize psi_drift_avg term to be around the same magnitude as the bump function
-    # obj_out = obj_out * (psi_drift_avg**2) * jnp.max(obj_out_test_bump) / (jnp.max(psi_drift_avg**2))
     obj_out = obj_out * (psi_drift_avg**2)
-
-    # Non-normalized psi_drift_avg
-    # obj_out = obj_out * (psi_drift_avg**2)
     
     # return obj_out, which is a 1D array (each element represents a surface and pitch combination)
     # data["f_tr1"] = jnp.reshape(obj_out,num_pitch*grid.num_rho*len(KE_frac))
