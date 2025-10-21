@@ -724,10 +724,10 @@ def f_tr1(params, transforms, profiles, data, **kwargs):
     N = kwargs.get("N",0)
     nfp = kwargs.get("nfp",jnp.nan)
     KE_frac = kwargs.get("KE_frac",0.00000001)
-    p_max = kwargs.get("p_max",3)
-    q_max = kwargs.get("q_max",3)
-    res_range_min = kwargs.get("res_range_min",-3)
-    res_range_max = kwargs.get("res_range_max",3)
+    p_max = kwargs.get("p_max",10)
+    q_max = kwargs.get("q_max",10)
+    res_range_min = kwargs.get("res_range_min",-4)
+    res_range_max = kwargs.get("res_range_max",4)
     bt_filter_flag = kwargs.get("bt_filter_flag",True)
     rt_filter_flag = kwargs.get("rt_filter_flag",True)
     include_zero_res = kwargs.get("include_zero_res",True)
@@ -927,7 +927,7 @@ def f_tr1(params, transforms, profiles, data, **kwargs):
     # Set parameters
     w = 1 # in combination with A, changes width and amplitude of bump function
     # A = 100 # in combination with w, changes width and amplitude of bump function
-    wd = jnp.ones((jnp.shape(omega_broad))) * 0.0005 # sets half-width of bump function
+    wd = jnp.ones((jnp.shape(omega_broad))) * 0.005 # sets half-width of bump function
     a = res_broad + wd
     b = res_broad - wd
     # t = -1 # for form option 1
@@ -975,15 +975,19 @@ def f_tr1(params, transforms, profiles, data, **kwargs):
         condition,
         # A * jnp.exp(  jnp.clip(-w * (( -((y+0.5)**2) + (y+0.5) )**t),-500,500)  ), # form option 1, clip to avoid overflow warning in jnp.exp()
         safediv(A * jnp.exp(  jnp.clip( w * ((a-b)**2) / ( (omega_broad-b) * (omega_broad-a) ) ,-500,500)  ), q_broad), # form option 2, clip to avoid overflow warning in jnp.exp()
-        # safediv(A * jnp.exp(  jnp.clip( w * ((a-b)**2) / ( (omega_broad-b) * (omega_broad-a) ) ,-500,500)  ), q_broad),
         0
         ) # need to broadcast res_arr to 3D to match each res with each 2D matrix of omega_arr and then do this subtraction and jnp.where operation
-    obj_out_test = obj_out
     obj_out = jnp.sum(obj_out,axis=3) # outputs array with size (rho,pitch,energy), where we have summed over all resonances in this line
+    obj_out_test_bump = obj_out
+
+    # Normalize psi_drift_avg term to be around the same magnitude as the bump function
+    # obj_out = obj_out * (psi_drift_avg**2) * jnp.max(obj_out_test_bump) / (jnp.max(psi_drift_avg**2))
     obj_out = obj_out * (psi_drift_avg**2)
-    # obj_out = y[:,0,0]**2 # debugging
+
+    # Non-normalized psi_drift_avg
+    # obj_out = obj_out * (psi_drift_avg**2)
     
     # return obj_out, which is a 1D array (each element represents a surface and pitch combination)
     # data["f_tr1"] = jnp.reshape(obj_out,num_pitch*grid.num_rho*len(KE_frac))
-    data["f_tr1"] = {'res':res_broad,'obj_test':obj_out_test,'obj':obj_out, 'omega': omega_broad, 'condition':condition, 'psi_da': psi_drift_avg} # not flattening for plotting, need to flatten for optimization
+    data["f_tr1"] = {'res':res_broad,'obj_bump':obj_out_test_bump,'obj':obj_out, 'omega': omega_broad, 'condition':condition, 'psi_da': psi_drift_avg} # not flattening for plotting, need to flatten for optimization
     return data
