@@ -921,15 +921,64 @@ def f_tr1(params, transforms, profiles, data, **kwargs):
     # Set up resonance, omega, and psi_drift_avg arrays
     res_broad = res_arr[None,None,None,:] # make 4D array with res values on axis=3
     res_broad = jnp.broadcast_to(res_broad, (omega_arr.shape[0], omega_arr.shape[1], omega_arr.shape[2], res_arr.shape[0]))
-    omega_broad = jnp.broadcast_to(omega_arr[...,None], (omega_arr.shape[0],omega_arr.shape[1],omega_arr.shape[2],res_arr.shape[0]))
     # psi_da_broad = jnp.broadcast_to(psi_drift_avg[...,None], (psi_drift_avg.shape[0],psi_drift_avg.shape[1],psi_drift_avg.shape[2])) # 3D because grad(psi) is not related to resonances in this objective function
 
     # Set parameters
     w = 1 # in combination with A, changes width and amplitude of bump function
     # A = 100 # in combination with w, changes width and amplitude of bump function
     wd = jnp.ones((jnp.shape(omega_broad))) * 0.005 # sets half-width of bump function
-    a = res_broad + wd
-    b = res_broad - wd
+
+
+    # wd calculation for even spacing in omega_{zeta} space
+    def avg_neighbor_dist(a,x):
+        # Calculate the x nearest neighbor from a[i] on both sides and average them
+        '''
+        a: jnp.array, array of values to calculate this function for
+        x: int, number of indices to go out from a[i]
+        '''
+        n=a.shape[0]
+        A = jnp.transpose( jnp.broadcast_to(a, (n, n)) )
+        idx = jnp.arange(n)
+        index_diff = idx[:, None] - idx[None, :]
+        mask = index_diff == x
+        idx_below = jnp.where(mask, 1, 0)
+        mask = index_diff == -x
+        idx_above = jnp.where(mask, 1, 0)
+        mask = index_diff == 0
+        # Possible bug at this line above here if two elements of the index_diff happen to be numerically exactly the same (unlikely). Can use jnp.inf instead but not sure if this will be differentiable
+        a_diag = jnp.where(mask,-A,0) # flip sign of diagonal to do subtraction between diag and above/below axis
+        a_below = jnp.where(idx_below==1,A,0) + a_diag # these two terms must be opposite sign from initial sign
+        a_above = jnp.where(idx_above==1,A,0) + a_diag
+        a_bs = jnp.abs( jnp.sum(a_below,axis=0) ) # find distance between below point and diagonal
+        a_as = jnp.abs( jnp.sum(a_above,axis=0) ) # find distance between above point and diagonal
+
+        # Edge cases bug fix attempt
+        # bug fix: if this sum coincidentially yields just the diagonal in both a_bs and a_as, we know they won't have edge cases at the same time, 
+        # so we will make this a condition on whether or not to keep the value
+        # TLDR: if both a_as and a_bs =a, a coincidence case was found
+        # a_bs = jnp.where((a_bs==a) & (a_as!=a),0,a_bs) # if just a diagonal was added, this is an edge case, set to zero
+        # a_as = jnp.where(a_as==a,0,a_as)
+        # the problem with this bug fix right now is that you don't know which side (as or bs) the coincidence is
+        # bug still exists but it is unlikely so I will move on for now
+
+        # Edge cases with bug
+        a_bs = jnp.where(a_bs==a,0,a_bs) # if just a diagonal was added, this is an edge case, set to zero
+        a_as = jnp.where(a_as==a,0,a_as)
+
+        # Now return the average distance between the x nearest neighbor from each point of a 1D array
+        return jnp.where(
+            (a_bs!=0) & (a_as!=0),
+            (a_bs + a_as)/2, # needs to be divided by number of people playing
+            jnp.where(a_bs!=0,a_bs,a_as) # no averaging, just taking the one side value
+        )
+
+    # take 2d omega array and apply avg_neighbor_dist func to each pitch for all the s
+    nearest_s = jax.vmap(avg_neighbor_dist, in_axes=0) 
+    omega_d = nearest_s(jnp.transpose(omega_arr, (1,0,2))) # change to (pitch,rho,energy) so avg_neighbor_dist is taken correctly
+
+    omega_broad = jnp.broadcast_to(omega_arr[...,None], (omega_arr.shape[0],omega_arr.shape[1],omega_arr.shape[2],res_arr.shape[0]))
+    a = res_broad + omega_d
+    b = res_broad - omega_d
     # t = -1 # for form option 1
 
     # Determine which resonances are considered for which frequencies
@@ -967,7 +1016,6 @@ def f_tr1(params, transforms, profiles, data, **kwargs):
         integral = jnp.sum(integrand * quad_weights * jacobian, axis=-1)
 
         return 1 / integral # compute normalization of bump function
-    # note the normalization of psi_da_broad is roped into the entire objective function being normalized, see _neoclassical.py in "objectives" directory
 
     # Calculate objective function
     A=bump_func_normalize(w,b,a)
@@ -981,7 +1029,7 @@ def f_tr1(params, transforms, profiles, data, **kwargs):
     obj_out_test_bump = obj_out
 
     # Normalize psi_drift_avg term to be around the same magnitude as the bump function
-    obj_out = obj_out * (psi_drift_avg**2)
+    obj_out = obj_out * jnp.abs(psi_drift_avg) # can modify abs to be jnp.sqrt(x**2+eps) and lose some accuracy but be safe around 0. I think jax sets any derivative at 0 to 0
     
     # return obj_out, which is a 1D array (each element represents a surface and pitch combination)
     # data["f_tr1"] = jnp.reshape(obj_out,num_pitch*grid.num_rho*len(KE_frac))
