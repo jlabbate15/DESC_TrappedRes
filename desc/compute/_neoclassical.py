@@ -744,6 +744,8 @@ def f_tr1(params, transforms, profiles, data, **kwargs):
         )
     )
 
+    def opt_abs(x,eps=1*10**-9):
+        return jnp.sqrt(x**2+eps)
     def alpha_drift(data):
         bounce = Bounce1D(grid, data, quad, is_reshaped=True)
         points = bounce.points(data["pitch_inv"], num_well=num_well)
@@ -926,7 +928,7 @@ def f_tr1(params, transforms, profiles, data, **kwargs):
     # Set parameters
     w = 1 # in combination with A, changes width and amplitude of bump function
     # A = 100 # in combination with w, changes width and amplitude of bump function
-    wd = jnp.ones((jnp.shape(omega_broad))) * 0.005 # sets half-width of bump function
+    # wd = jnp.ones((jnp.shape(omega_broad))) * 0.005 # sets half-width of bump function
 
 
     # wd calculation for even spacing in omega_{zeta} space
@@ -973,17 +975,40 @@ def f_tr1(params, transforms, profiles, data, **kwargs):
         )
 
     # take 2d omega array and apply avg_neighbor_dist func to each pitch for all the s
-    nearest_s = jax.vmap(avg_neighbor_dist, in_axes=0) 
-    omega_d = nearest_s(jnp.transpose(omega_arr, (1,0,2))) # change to (pitch,rho,energy) so avg_neighbor_dist is taken correctly
+    # can update at a later date to include energies
+    ''' COMMENT OUT THIS CODE WHEN DOING MORE THAN ONE PITCH (but needs fixing)
+    def tb_pitchnum(omega_arr,avg_neighbor_dist):
+        omega_arr_ne = omega_arr[:,:,0] # only consider one energy, so this is (rho,pitch)
+        nearest_s = jax.vmap(avg_neighbor_dist, in_axes=1, out_axes=1) # in_axes=1 feeds in slices of axis=0, out_axis=1 stacks the outputs along slices of axis=0
+        # so each pitch is along axis=1, and each rho slice is along axis=0, and 1D arrays are taken of axis=0 slices
+        return nearest_s(omega_arr_ne,x=3) # (rho nearest neighbors,pitch)
+    def fb_pitchnum(omega_arr,avg_neighbor_dist): # only one pitch
+        omega_arr_ne = omega_arr[:,0,0] # only consider one energy, so this is (rho,pitch)
+        return avg_neighbor_dist(omega_arr_ne,x=3)
+    omega_d = jax.lax.cond(len(omega_arr[0,:,0])>1,tb_pitchnum,fb_pitchnum,omega_arr,avg_neighbor_dist)'''
+        
+    # only consider one pitch (for now)
+    ''' an attempt at automating x
+    def soft_iseven(x):
+    # smooth function ≈ 1 for even integers, 0 for odd ones
+    return 0.5 * (1.0 + jnp.cos(jnp.pi * x))
+    def tb_round(num): # integer is even
+        return num
+    def fb_round(num): # integer is odd
+        return num+1
+    num_rho_round = jax.lax.cond(soft_iseven(len(omega_arr.shape[0]))==1,tb_round,fb_round,len(omega_arr.shape[0]))'''
+    omega_d = avg_neighbor_dist(omega_arr[:,0,0],x=15)
+    # rebroadcast omega_d for computation with resonance array
+    omega_d = jnp.broadcast_to(omega_d[:, None, None, None], (omega_d.shape[0], omega_arr.shape[1], omega_arr.shape[2], res_arr.shape[0]))
 
-    omega_broad = jnp.broadcast_to(omega_arr[...,None], (omega_arr.shape[0],omega_arr.shape[1],omega_arr.shape[2],res_arr.shape[0]))
     a = res_broad + omega_d
     b = res_broad - omega_d
     # t = -1 # for form option 1
 
     # Determine which resonances are considered for which frequencies
+    omega_broad = jnp.broadcast_to(omega_arr[...,None], (omega_arr.shape[0],omega_arr.shape[1],omega_arr.shape[2],res_arr.shape[0]))
     y = omega_broad - res_broad
-    condition = jnp.logical_and(abs(y) < wd, res_broad!=jnp.pi) # check that corresponding omega value is less than wd away from the resonance and not jnp.pi (unset)
+    condition = jnp.logical_and(abs(y) < omega_d, res_broad!=jnp.pi) # check that corresponding omega value is less than wd away from the resonance and not jnp.pi (unset)
 
     # Create q array for division into objective function
     q_broad = q_arr[None,None,None,:] # make 4D array with q values on axis=3
@@ -1029,9 +1054,9 @@ def f_tr1(params, transforms, profiles, data, **kwargs):
     obj_out_test_bump = obj_out
 
     # Normalize psi_drift_avg term to be around the same magnitude as the bump function
-    obj_out = obj_out * jnp.abs(psi_drift_avg) # can modify abs to be jnp.sqrt(x**2+eps) and lose some accuracy but be safe around 0. I think jax sets any derivative at 0 to 0
+    obj_out = obj_out * opt_abs(psi_drift_avg) # can modify abs to be jnp.sqrt(x**2+eps) and lose some accuracy but be safe around 0. I think jax sets any derivative at 0 to 0
     
     # return obj_out, which is a 1D array (each element represents a surface and pitch combination)
     # data["f_tr1"] = jnp.reshape(obj_out,num_pitch*grid.num_rho*len(KE_frac))
-    data["f_tr1"] = {'res':res_broad,'obj_bump':obj_out_test_bump,'obj':obj_out, 'omega': omega_broad, 'condition':condition, 'psi_da': psi_drift_avg} # not flattening for plotting, need to flatten for optimization
+    data["f_tr1"] = {'res':res_broad,'obj_bump':obj_out_test_bump,'obj':obj_out, 'omega': omega_broad, 'condition':condition, 'psi_da': psi_drift_avg, 'omega_d': omega_d} # not flattening for plotting, need to flatten for optimization
     return data
