@@ -866,7 +866,7 @@ def f_tr1(params, transforms, profiles, data, **kwargs):
     def jnpmean_nz(x,axis=0):
         mask = x!=0.0
         count = jnp.sum(mask,axis) # how many wells that are not 0
-        return jnp.sum(x,axis=axis) / count
+        return safediv(jnp.sum(x,axis=axis) , count)
     def jnpstd_nz(x,axis=0): # compute population standard deviation of an array while ignoring "nan" elements in JAX numpy
         # x is an array with size: (num_wells*num_fieldlines,num_rho,num_pitch)
         xbar = jnpmean_nz(x,axis=axis)
@@ -918,15 +918,13 @@ def f_tr1(params, transforms, profiles, data, **kwargs):
 
     # Objective function calculation (per surface per pitch angle) #
     
-    # Set up resonance, omega, and psi_drift_avg arrays
+    # Set up resonance and omega arrays
     res_broad = res_arr[None,None,None,:] # make 4D array with res values on axis=3
     res_broad = jnp.broadcast_to(res_broad, (omega_arr.shape[0], omega_arr.shape[1], omega_arr.shape[2], res_arr.shape[0]))
     omega_broad = jnp.broadcast_to(omega_arr[...,None], (omega_arr.shape[0],omega_arr.shape[1],omega_arr.shape[2],res_arr.shape[0]))
-    # psi_da_broad = jnp.broadcast_to(psi_drift_avg[...,None], (psi_drift_avg.shape[0],psi_drift_avg.shape[1],psi_drift_avg.shape[2])) # 3D because grad(psi) is not related to resonances in this objective function
 
     # Set parameters
-    w = 1 # in combination with A, changes width and amplitude of bump function
-    # A = 100 # in combination with w, changes width and amplitude of bump function
+    w = 1 # changes width and amplitude of bump function
     wd = jnp.ones((jnp.shape(omega_broad))) * 0.05 # sets half-width of bump function
     a = res_broad + wd
     b = res_broad - wd
@@ -971,19 +969,25 @@ def f_tr1(params, transforms, profiles, data, **kwargs):
 
     # Calculate objective function
     A=bump_func_normalize(w,b,a)
-    obj_out = jnp.where(
+    rho_resol = grid.nodes[1,0]-grid.nodes[0,0] # is an evenly spaced grid
+    o1 = True # True for option 1, false for option 2
+    if o1:
+        domega_ds = 1 # derivative of omega over s, or omega shear
+    else:
+        domega_ds = 1
+    f_b = jnp.where(
         condition,
         # A * jnp.exp(  jnp.clip(-w * (( -((y+0.5)**2) + (y+0.5) )**t),-500,500)  ), # form option 1, clip to avoid overflow warning in jnp.exp()
-        safediv(A * jnp.exp(  jnp.clip( w * ((a-b)**2) / ( (omega_broad-b) * (omega_broad-a) ) ,-500,500)  ), q_broad), # form option 2, clip to avoid overflow warning in jnp.exp()
+        safediv(A * jnp.exp(  jnp.clip( w * ((a-b)**2) / ( (omega_broad-b) * (omega_broad-a) ) ,-500,500)  ), q_broad**2), # form option 2, clip to avoid overflow warning in jnp.exp()
         # safediv(A * jnp.exp(  jnp.clip( w * ((a-b)**2) / ( (omega_broad-b) * (omega_broad-a) ) ,-500,500)  ), q_broad),
         0
         ) # need to broadcast res_arr to 3D to match each res with each 2D matrix of omega_arr and then do this subtraction and jnp.where operation
-    obj_out_test = obj_out
-    obj_out = jnp.sum(obj_out,axis=3) # outputs array with size (rho,pitch,energy), where we have summed over all resonances in this line
-    obj_out = obj_out * (psi_drift_avg**2)
+    obj_out_test = f_b
+    f_b = jnp.sum(f_b,axis=3) # outputs array with size (rho,pitch,energy), where we have summed over all resonances in this line
+    obj_out = f_b * (psi_drift_avg**2) * rho_resol / domega_ds
     # obj_out = y[:,0,0]**2 # debugging
     
     # return obj_out, which is a 1D array (each element represents a surface and pitch combination)
     # data["f_tr1"] = jnp.reshape(obj_out,num_pitch*grid.num_rho*len(KE_frac))
-    data["f_tr1"] = {'res':res_broad,'obj_test':obj_out_test,'obj':obj_out, 'omega': omega_broad, 'condition':condition, 'psi_da': psi_drift_avg, 'pitch_invs': pitch_inv} # not flattening for plotting, need to flatten for optimization
+    data["f_tr1"] = {'res':res_broad,'obj_test':obj_out_test,'obj':obj_out, 'omega': omega_broad, 'condition':condition, 'psi_da': psi_drift_avg, 'pitch_invs': pitch_inv, 'y':y} # not flattening for plotting, need to flatten for optimization
     return data
