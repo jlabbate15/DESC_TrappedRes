@@ -925,7 +925,46 @@ def f_tr1(params, transforms, profiles, data, **kwargs):
 
     # Set parameters
     w = 1 # changes width and amplitude of bump function
-    wd = jnp.ones((jnp.shape(omega_broad))) * 0.05 # sets half-width of bump function
+    # def arr_max_1d(omega_arr,resol): # only doing for one energy right now
+    #     """
+    #     omega_arr: jax array of omega values, (rho,pitch,energy)
+    #     resol: how many of the largest separations between omega values do you want
+    #     """
+    #     omega_arr_sep = omega_arr[1:,:,:] - omega_arr[0:-1,:,:] # examine omega separation of all radial points
+    #     omega_arr_sep_mapped =  # map array
+
+    #     wd = tau*jnp.log(jnp.sum(jnp.exp(omega_arr_sep/tau))) # soft max of flattened omega_arr
+    #     # redefine omega_arr_sep so everything is on an interval from 0 to 1
+    #     # find max on that interval using this function with a hardcoded tau
+    #     # look for index of omega_arr_sep that corresponds to tau using a jnp.where(eps) typeshit
+    #     # you have the index of your max in omega_arr_sep
+
+    #     return arr_max
+    def arr_max_1d(arr):
+        # arr_sep = arr[1:,...] - arr[0:-1,...] # examine omega separation of all radial points
+        max_num = 99999999999999.9
+        max_i = len(arr)+10 # this will throw an error if this function is not written correctly
+        i_dumby = 0
+        arr_dict = {'arr':arr,'i':i_dumby,'max_num':max_num,'max_i':max_i}
+        def body_fun(i,arr_dict):
+            cond_dict = {'arr':arr_dict['arr'],
+                            'i':i,
+                            'max_num':max_num,
+                            'max_i':max_i}
+            def tb_max(cond_dict):
+                cond_dict['max_num'] = cond_dict['arr'][cond_dict['i']]
+                cond_dict['max_i'] = cond_dict['i']
+                return cond_dict
+            def fb_max(cond_dict):
+                return cond_dict
+            return jax.lax.cond(cond_dict['arr'][i]<cond_dict['max_num'],tb_max,fb_max,cond_dict)
+        out = jax.lax.fori_loop(0,len(arr),body_fun,arr_dict)
+        return {'max_i':out['max_i'],'max_num':out['max_num']} # returns a dict with the index of max occurance and the value of the maximum
+
+    arr_max_1d_map = jax.vmap(arr_max_1d,in_axes=1,out_axes=0)
+    wd_perpitch = arr_max_1d_map(omega_arr[1:,:,0] - omega_arr[:-1,:,0]) # not looking at energies right now
+    wd = arr_max_1d(wd_perpitch['max_num']) # sets half-width of bump function based on resolution
+    wd = wd['max_num']
     a = res_broad + wd
     b = res_broad - wd
     # t = -1 # for form option 1
@@ -972,7 +1011,9 @@ def f_tr1(params, transforms, profiles, data, **kwargs):
     rho_resol = grid.nodes[1,0]-grid.nodes[0,0] # is an evenly spaced grid
     o1 = True # True for option 1, false for option 2
     if o1:
-        domega_ds = 1 # derivative of omega over s, or omega shear
+        domega_ds = jnp.gradient(omega_arr[:,:,0]) # derivative of omega over s, or omega shear, for each pitch (only considering one energy right now)
+        # this outputs the shear at each s point along each pitch
+        domega_ds = jnp.broadcast_to(domega_ds.shape[0],domega_ds.shape[1],omega_arr.shape[2])
     else:
         domega_ds = 1
     f_b = jnp.where(
