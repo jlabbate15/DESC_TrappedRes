@@ -720,12 +720,14 @@ def f_tr2(params, transforms, profiles, data, **kwargs):
     q_broad = q_arr[None,None,None,:] # make 4D array with q values on axis=3
     q_broad = jnp.broadcast_to(q_broad, (omega_arr.shape[0], omega_arr.shape[1], omega_arr.shape[2], q_arr.shape[0])) # := (rho,Bcrit,well,res)
 
-    # Calculate bump function (f_b) and sum over resonances
+    # Calculate bump function (f_b) and sum over resonances (with n^-2)
     f_b_res = jnp.where(
         condition,
         safediv(jnp.exp(  jnp.clip( safediv(w * ((a-b)**2) , ( (omega_broad-b) * (omega_broad-a)) ) ,-500,500)  ), q_broad**2), # clip to avoid overflow warning in jnp.exp()
         0
         ) # := (rho,Bcrit,well,res)
+
+    # Sum over resonances
     f_b = jnp.sum(f_b_res,axis=-1) # := (rho,Bcrit,well)
 
     # First sum over rho
