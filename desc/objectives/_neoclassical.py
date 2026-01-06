@@ -521,7 +521,8 @@ class TrappedResonance(_Objective):
             "rho_res": (rho[-1]-rho[0])/(len(rho)-1),
             "Bcrit_res": (pitch_invs[-1]-pitch_invs[0])/(len(pitch_invs)-1),
             "Psi": Psi,
-            "QS_flag": QS_flag
+            "QS_flag": QS_flag,
+            "rhos": rho
         }
         self._keys_1dr = ["iota", "iota_r", "min_tz |B|", "max_tz |B|"]
         self._key = "f_tr2"

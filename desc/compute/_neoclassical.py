@@ -493,6 +493,7 @@ def f_tr2(params, transforms, profiles, data, **kwargs):
     Psi = kwargs.get("Psi",None)
     wd_blur = kwargs.get('wd_blur',3)
     QS_flag = kwargs.get('QS_flag',False) # True for QS
+    rhos = kwargs.get('rhos',None)
 
     # Setup energies
     m_alpha = 6.6446573450*10**(-27) # kg, mass of alpha particle
@@ -727,8 +728,34 @@ def f_tr2(params, transforms, profiles, data, **kwargs):
         0
         ) # := (rho,Bcrit,well,res)
 
+    # Calculate rho_{max} #
+    # Calculate rho_{res}
+    f_b_res_t = jnp.transpose(f_b_res,(1,2,3,0)) # := (Bcrit,well,res,rho)
+    rho_res_vmap = jax.vmap( # With vmap, least-embedded maps are applied first
+        jax.vmap(
+            jax.vmap(arr_max_1d, in_axes=0),   # res axis
+            in_axes=0                          # well axis
+        ),
+        in_axes=0                              # Bcrit axis
+    )
+    idx = rho_res_vmap(f_b_res_t) # := (Bcrit,well,res), no crossings have idx=0
+    idx = idx[:,:,:]['max_i']
+    # omega_broad (rho,Bcrit,well,res) -> rho axis corresponds exactly to input rho array
+    idx = jnp.broadcast_to(idx[None,:,:,:],(ado_shape[0],ado_shape[2],ado_shape[3],res_arr.shape[0])) # := (rho,Bcrit,well,res)
+    rhos_res = jnp.broadcast_to(rhos[...,None,None,None],(ado_shape[0],ado_shape[2],ado_shape[3],res_arr.shape[0])) # := (rho,Bcrit,well,res)
+    rhos_res = jnp.take_along_axis(rhos_res,idx,axis=0) # := (1,Bcrit,well,res)
+    rhos_res = jnp.squeeze(rhos_res, axis=0) # := (Bcrit,well,res)
+    rhos_res = jnp.where(idx==0,0,rhos_res) # set weightings for no crossings found = 0
+
+    # Calculate Delta rho
+    omega_prime = jnp.gradient(omega_broad,rho_res,axis=0) # := (rho,Bcrit,well,res)
+    Deltarho = ( 4**4 * safediv(psi_drift_out , q_broad**2) / (omega_prime**(2)*jnp.pi*Psi[-1]**4) ) ** (1/8) # := (rho,Bcrit,well,res)
+
+    rho_max = arr_max_1d(jnp.array([rhos_res + Deltarho,rhos_res - Deltarho])) # := (rho,Bcrit,well,res)
+
+
     # Sum over resonances
-    f_b = jnp.sum(f_b_res,axis=-1) # := (rho,Bcrit,well)
+    f_b = jnp.sum(f_b_res*rho_max,axis=-1) # := (rho,Bcrit,well)
 
     # First sum over rho
     iotas_rho1_sum = jnp.broadcast_to(iotas[...,None,None],(iotas.shape[0], ado_shape[2], ado_shape[3])) # := (rho,Bcrit,well)
