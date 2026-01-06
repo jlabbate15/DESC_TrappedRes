@@ -776,15 +776,9 @@ def f_tr2(params, transforms, profiles, data, **kwargs):
 
     # data["f_tr2"] = f_tr2_out # full output
     data["f_tr2"] = { # for plotting/debugging
-        'omega_arr':omega_arr_test,
-        'psi_drift_out':psi_drift_out,
-        'iotas_rho1_sum': iotas_rho1_sum,
-        'f_b': f_b,
-        'tau_arr': tau_arr,
-        'nfp': nfp,
-        'alpha_drift_out':alpha_drift_out,
-        'pitch_inv':pitch_inv,
-        'f_tr2_out':f_tr2_out,
-        'iotas': iotas,
+        'omega_arr':omega_arr,
+        'rhos_max': rhos_max,
+        'res_arr': res_arr,
+        'f_b_res': f_b_res
         }
     return data
