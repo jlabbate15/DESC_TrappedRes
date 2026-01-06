@@ -739,23 +739,37 @@ def f_tr2(params, transforms, profiles, data, **kwargs):
         in_axes=0                              # Bcrit axis
     )
     idx = rho_res_vmap(f_b_res_t) # := (Bcrit,well,res), no crossings have idx=0
-    idx = idx[:,:,:]['max_i']
+    idx = idx['max_i']
     # omega_broad (rho,Bcrit,well,res) -> rho axis corresponds exactly to input rho array
-    idx = jnp.broadcast_to(idx[None,:,:,:],(ado_shape[0],ado_shape[2],ado_shape[3],res_arr.shape[0])) # := (rho,Bcrit,well,res)
+    idx = jnp.broadcast_to(idx[None,...],(ado_shape[0],ado_shape[2],ado_shape[3],res_arr.shape[0])) # := (rho,Bcrit,well,res)
     rhos_res = jnp.broadcast_to(rhos[...,None,None,None],(ado_shape[0],ado_shape[2],ado_shape[3],res_arr.shape[0])) # := (rho,Bcrit,well,res)
-    rhos_res = jnp.take_along_axis(rhos_res,idx,axis=0) # := (1,Bcrit,well,res)
-    rhos_res = jnp.squeeze(rhos_res, axis=0) # := (Bcrit,well,res)
-    rhos_res = jnp.where(idx==0,0,rhos_res) # set weightings for no crossings found = 0
+    rhos_res = jnp.take_along_axis(rhos_res,idx,axis=0) # := (rho,Bcrit,well,res), rho column is just a column of repeat values from jnp.take_along_axis
+    rhos_res = jnp.where(idx==0,0,rhos_res) # := (rho,Bcrit,well,res), set weightings for no crossings found = 0, no crossings have idx=0
+    # rhos_res = rhos_res[0,:,:,:] # := (Bcrit,well,res)
 
     # Calculate Delta rho
-    omega_prime = jnp.gradient(omega_broad,rho_res,axis=0) # := (rho,Bcrit,well,res)
-    Deltarho = ( 4**4 * safediv(psi_drift_out , q_broad**2) / (omega_prime**(2)*jnp.pi*Psi[-1]**4) ) ** (1/8) # := (rho,Bcrit,well,res)
+    omega_prime = jnp.gradient(omega_broad,rho_res,axis=0) # := (rho,Bcrit,well,res), omega_arr is :=(rho,Bcrit,well)
+    psi_drift_out_broad = jnp.broadcast_to(psi_drift_out[...,None],(ado_shape[0],ado_shape[2],ado_shape[3],res_arr.shape[0])) # := (rho,Bcrit,well,res)
+    Deltarho = ( 4**4 * safediv(psi_drift_out_broad , q_broad**2) / (omega_prime**(2)*jnp.pi*Psi[-1]**4) ) ** (1/8) # := (rho,Bcrit,well,res)
 
-    rho_max = arr_max_1d(jnp.array([rhos_res + Deltarho,rhos_res - Deltarho])) # := (rho,Bcrit,well,res)
+    abs_arr = jnp.array([rho_res + Deltarho/2,rho_res - Deltarho/2]) # := (pm_rhomax,rho,Bcrit,well,res)
+    abs_arr = jnp.transpose(abs_arr,[1,2,3,4,0]) # := (rho,Bcrit,well,res,pm_rhomax)
+    rho_max_vmap = jax.vmap( # With vmap, least-embedded maps are applied first
+                        jax.vmap(
+                            jax.vmap(
+                                jax.vmap(arr_max_1d, in_axes=0),   # res axis
+                                in_axes=0                          # well axis
+                            ),
+                            in_axes=0                              # Bcrit axis
+                        ),
+                        in_axes=0                                  # rho axis
+                    )    
+    rho_max = rho_max_vmap(abs_arr) # := (rho,Bcrit,well,res)
+    rho_max = rho_max['max_num'] # := (rho,Bcrit,well,res)
 
 
     # Sum over resonances
-    f_b = jnp.sum(f_b_res*rho_max,axis=-1) # := (rho,Bcrit,well)
+    f_b = jnp.sum(f_b_res*rho_max**2,axis=-1) # := (rho,Bcrit,well)
 
     # First sum over rho
     iotas_rho1_sum = jnp.broadcast_to(iotas[...,None,None],(iotas.shape[0], ado_shape[2], ado_shape[3])) # := (rho,Bcrit,well)
@@ -780,17 +794,18 @@ def f_tr2(params, transforms, profiles, data, **kwargs):
     f_tr2_out = jnp.sum(f_tr2_out,axis=0) # scalar
 
 
-    data["f_tr2"] = f_tr2_out # full output
-    # data["f_tr2"] = { # for plotting/debugging
-    #     'omega_arr':omega_arr_test,
-    #     'psi_drift_out':psi_drift_out,
-    #     'iotas_rho1_sum': iotas_rho1_sum,
-    #     'f_b': f_b,
-    #     'tau_arr': tau_arr,
-    #     'nfp': nfp,
-    #     'alpha_drift_out':alpha_drift_out,
-    #     'pitch_inv':pitch_inv,
-    #     'f_tr2_out':f_tr2_out,
-    #     'iotas': iotas
-    #     }
+    # data["f_tr2"] = f_tr2_out # full output
+    data["f_tr2"] = { # for plotting/debugging
+        'omega_arr':omega_arr_test,
+        'psi_drift_out':psi_drift_out,
+        'iotas_rho1_sum': iotas_rho1_sum,
+        'f_b': f_b,
+        'tau_arr': tau_arr,
+        'nfp': nfp,
+        'alpha_drift_out':alpha_drift_out,
+        'pitch_inv':pitch_inv,
+        'f_tr2_out':f_tr2_out,
+        'iotas': iotas,
+
+        }
     return data
