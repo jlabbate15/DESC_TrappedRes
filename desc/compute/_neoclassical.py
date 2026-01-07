@@ -729,6 +729,28 @@ def f_tr2(params, transforms, profiles, data, **kwargs):
         ) # := (rho,Bcrit,well,res)
 
     # Calculate rho_{max} #
+    # Check which rational omega crossings occur
+    def soft_cross(a, b, k=1e3):
+        return 1 / (1 + jnp.exp(k*a*b))
+    f0 = omega_arr[:-1, :, :] # := (rho-1,Bcrit,well)
+    f1 = omega_arr[1:,  :, :] # := (rho-1,Bcrit,well)
+    r = jnp.broadcast_to(res_arr[None, None, None, :],(ado_shape[0]-1,ado_shape[2],ado_shape[3],res_arr.shape[0])) # := (rho-1,Bcrit,well,res)
+    f0_broad = jnp.broadcast_to(f0[:, :, :, None],(ado_shape[0]-1,ado_shape[2],ado_shape[3],res_arr.shape[0])) # := (rho-1,Bcrit,well,res))
+    f1_broad = jnp.broadcast_to(f1[:, :, :, None],(ado_shape[0]-1,ado_shape[2],ado_shape[3],res_arr.shape[0])) # := (rho-1,Bcrit,well,res))
+    a = f0_broad - r
+    b = f1_broad - r
+    cross_score = soft_cross(a, b) # outputs ~1 if r was in relevant omega_arr interval and ~0 for vice versa, := (rho-1,Bcrit,well,res))
+    cross_score = jnp.transpose(cross_score,(1,2,3,0)) # := (Bcrit,well,res,rho-1)
+    cross_score_vmap = jax.vmap( # With vmap, least-embedded maps are applied first
+        jax.vmap(
+            jax.vmap(arr_max_1d, in_axes=0),   # res axis
+            in_axes=0                          # well axis
+        ),
+        in_axes=0                              # Bcrit axis
+    )
+    cross_score = cross_score_vmap(cross_score) # := (Bcrit,well,res)
+    cross_score = jnp.broadcast_to(cross_score['max_num'][None,...],(ado_shape[0],ado_shape[2],ado_shape[3],res_arr.shape[0])) # := (rho,Bcrit,well,res)
+
     # Calculate rho_{res}
     f_b_res_t = jnp.transpose(f_b_res,(1,2,3,0)) # := (Bcrit,well,res,rho)
     rho_res_vmap = jax.vmap( # With vmap, least-embedded maps are applied first
@@ -738,13 +760,13 @@ def f_tr2(params, transforms, profiles, data, **kwargs):
         ),
         in_axes=0                              # Bcrit axis
     )
-    idx = rho_res_vmap(f_b_res_t) # := (Bcrit,well,res), no crossings have idx=0
+    idx = rho_res_vmap(f_b_res_t) # := (Bcrit,well,res)
     idx = idx['max_i']
     # omega_broad (rho,Bcrit,well,res) -> rho axis corresponds exactly to input rho array
     idx = jnp.broadcast_to(idx[None,...],(ado_shape[0],ado_shape[2],ado_shape[3],res_arr.shape[0])) # := (rho,Bcrit,well,res)
     rhos_res = jnp.broadcast_to(rhos[...,None,None,None],(ado_shape[0],ado_shape[2],ado_shape[3],res_arr.shape[0])) # := (rho,Bcrit,well,res)
-    rhos_res = jnp.take_along_axis(rhos_res,idx,axis=0) # := (rho,Bcrit,well,res), rho column is just a column of repeat values from jnp.take_along_axis
-    rhos_max = jnp.where(idx==0,0,rhos_res) # := (rho,Bcrit,well,res), set weightings for no crossings found = 0, no crossings have idx=0
+    rhos_res = jnp.take_along_axis(rhos_res,idx,axis=0) # := (rho,Bcrit,well,res), rho column is just a column of repeat values from jnp.take_along_axis    
+    rhos_max = cross_score * rhos_res # rid of rationals that did not get crossed through
     # rhos_res = rhos_res[0,:,:,:] # := (Bcrit,well,res)
 
 
@@ -779,6 +801,7 @@ def f_tr2(params, transforms, profiles, data, **kwargs):
         'omega_arr':omega_arr,
         'rhos_max': rhos_max,
         'res_arr': res_arr,
-        'f_b_res': f_b_res
+        'f_b_res': f_b_res,
+        'cross_score': cross_score
         }
     return data
