@@ -634,7 +634,7 @@ def f_tr2(params, transforms, profiles, data, **kwargs):
         points_1 = points[1][:][:][:][:]
         iotas_tb = jnp.broadcast_to(iotas[...,None,None,None],(iotas.shape[0],points_0.shape[1],points_0.shape[2],points_0.shape[3]))
         delta_chi = jnp.abs(jnp.abs(jnp.abs(points_0) - jnp.abs(points_1)) * (iotas_tb - N*nfp)) # zeta->chi assuming delta(alpha)=0
-        return jnp.where(delta_chi < float(2*jnp.pi),alpha_drift_out,0.0),jnp.where(delta_chi < float(2*jnp.pi),psi_drift_out,0.0) # set barely-trapped particles to 0
+        return jnp.where(delta_chi < float(2.5*jnp.pi),alpha_drift_out,0.0),jnp.where(delta_chi < float(2.5*jnp.pi),psi_drift_out,0.0) # set barely-trapped particles to 0
     def fb_btfilter(iotas,points,N,nfp,alpha_drift_out,psi_drift_out): # Do nothing
         return alpha_drift_out, psi_drift_out
     alpha_drift_out,psi_drift_out = jax.lax.cond(bt_filter_flag,tb_btfilter,fb_btfilter,iotas,points,N,nfp,alpha_drift_out,psi_drift_out)
@@ -772,7 +772,10 @@ def f_tr2(params, transforms, profiles, data, **kwargs):
     # rhos_res = rhos_res[0,:,:,:] # := (Bcrit,well,res)
 
     # Calculate Delta rho
-    omega_prime = jnp.gradient(omega_broad,rho_res,axis=0) # := (rho,Bcrit,well,res), omega_arr is :=(rho,Bcrit,well)
+    tau_arr_broad = alpha_res * jnp.sum(tau_arr,axis=1) / (2*jnp.pi) # := (rho,Bcrit,well), average over alpha values
+    tau_arr_broad = jnp.broadcast_to(tau_arr_broad[...,None],(ado_shape[0],ado_shape[2],ado_shape[3],res_arr.shape[0])) # := (rho,Bcrit,well,res)
+    small_omega_eta = omega_broad * (2*jnp.pi / tau_arr_broad) # := (rho,Bcrit,well,res), omega_eta = Omega_eta * omega_tau
+    omega_prime = jnp.gradient(small_omega_eta,rho_res,axis=0) # := (rho,Bcrit,well,res), omega_arr is :=(rho,Bcrit,well)
     psi_drift_out_broad = jnp.broadcast_to(psi_drift_out[...,None],(ado_shape[0],ado_shape[2],ado_shape[3],res_arr.shape[0])) # := (rho,Bcrit,well,res)
     Deltarho = ( 4**4 * safediv(psi_drift_out_broad , q_broad**2) / (omega_prime**(2)*jnp.pi*Psi[-1]**4) ) ** (1/8) # := (rho,Bcrit,well,res)
 
