@@ -593,8 +593,6 @@ def f_tr2(params, transforms, profiles, data, **kwargs):
     # alphas = grid.nodes[grid.unique_alpha_idx, 1]
     # thetas = grid_og.nodes[grid_og.unique_theta_idx, 1]
 
-    # Calculate critical magnetic field values on each rho surface
-
     # Start with evaluation of bounce integrals (rho,alpha,Bcrit,well)
     def drifts(data):
         bounce = Bounce1D(grid, data, quad, is_reshaped=True)
@@ -786,7 +784,8 @@ def f_tr2(params, transforms, profiles, data, **kwargs):
 
     ##### ISLAND WIDTH TERM #####
     # Sum psi_drift_out term over alpha
-    psi_drift_out = alpha_res * jnp.sum(psi_drift_out**2,axis=1) # := (rho,Bcrit,well)
+    psi_drift_out = safediv( ((m_alpha*v2[0])/(Z*e)) * psi_a * psi_drift_out , safediv(2*jnp.pi,tau_arr) )**2
+    psi_drift_out = alpha_res * jnp.sum( psi_drift_out ,axis=1) # := (rho,Bcrit,well)
     psi_drift_out = jnp.broadcast_to(psi_drift_out[...,None],(omega_arr.shape[0], omega_arr.shape[1], omega_arr.shape[2], q_arr.shape[0])) # := (rho,Bcrit,well,res)
 
     # Create n array for island width - make 4D array with n values on axis=3
@@ -841,6 +840,10 @@ def f_tr2(params, transforms, profiles, data, **kwargs):
             'Deltarho_4': Deltarho_4,
             'Omega_prime': omega_prime,
             'wd': wd,
+            'tau_arr': tau_arr,
+            'psi_drift_out': psi_drift_out,
+            'psi_a': psi_a,
+            'q_arr': q_arr
             }
     else:
         data["f_tr2"] = f_tr2_out # full output
