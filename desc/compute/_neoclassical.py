@@ -501,12 +501,15 @@ def _L_ra_fsa(data, transforms, profiles, **kwargs):
 
 def _poloidal_drift(data, B, pitch):
     return safediv(
-        data["gbdrift"] * (1 - 0.5 * pitch * B), jnp.sqrt(jnp.abs(1 - pitch * B))
+        # data["gbdrift"] * (1 - 0.5 * pitch * B), jnp.sqrt(jnp.abs(1 - pitch * B))
+        2 * (data["gbdrift (periodic)"] * pitch * B + 2 * (1 - pitch * B) * data["cvdrift (periodic)"]), jnp.sqrt(jnp.abs(1 - pitch * B))
+
     )
 
 def _radial_drift(data, B, pitch):
     return safediv(
-        data["cvdrift0"] * (1 - 0.5 * pitch * B), jnp.sqrt(jnp.abs(1 - pitch * B))
+        # data["cvdrift0"] * (1 - 0.5 * pitch * B), jnp.sqrt(jnp.abs(1 - pitch * B))
+        2 * data["cvdrift0"] * (2 - pitch * B), jnp.sqrt(jnp.abs(1 - pitch * B))
     )
 
 _bounce1D_doc = {
@@ -532,7 +535,7 @@ _bounce1D_doc = {
     transforms={"grid": []},
     profiles=[],
     coordinates="r",
-    data=["min_tz |B|", "max_tz |B|", "cvdrift0", "gbdrift", "fieldline length"]
+    data=["min_tz |B|", "max_tz |B|", "cvdrift0", "fieldline length", "gbdrift (periodic)", "cvdrift (periodic)"]
     # data=["min_tz |B|", "max_tz |B|", "gbdrift", "fieldline length"]
     + Bounce1D.required_names,
     source_grid_requirement={"coordinates": "raz", "is_meshgrid": True},
@@ -601,17 +604,21 @@ def f_tr2(params, transforms, profiles, data, **kwargs):
             [_v_tau, _poloidal_drift, _radial_drift],
             data["pitch_inv"],
             data,
-            ["gbdrift","cvdrift0"],
+            ["cvdrift0", "gbdrift (periodic)", "cvdrift (periodic)"],
             num_well=num_well,
         )
-        _alpha_drift = safediv(2.0 * _alpha_drift , v_tau) # safediv will take out NaNs
-        _psi_drift = safediv(2.0 * _psi_drift , v_tau) # safediv will take out NaNs
+        # _alpha_drift = safediv(2.0 * _alpha_drift , v_tau) # safediv will take out NaNs
+        # _psi_drift = safediv(2.0 * _psi_drift , v_tau) # safediv will take out NaNs
+        _alpha_drift = safediv(_alpha_drift , v_tau) # safediv will take out NaNs
+        _psi_drift = safediv(_psi_drift , v_tau) # safediv will take out NaNs
 
         return _alpha_drift, _psi_drift, points, v_tau, data
     alpha_drift_out, psi_drift_out, points, vtau_out, data = ( # *_drift_out := (rho,alpha,Bcrit,wells). Energy will be added in at some other time
         _compute(
             drifts, 
-            {"gbdrift": data["gbdrift"],"cvdrift0": data["cvdrift0"]},
+            {"cvdrift0": data["cvdrift0"],
+             "gbdrift (periodic)": data["gbdrift (periodic)"],
+             "cvdrift (periodic)": data["cvdrift (periodic)"]},
             data,
             grid,
             num_pitch,
@@ -735,7 +742,7 @@ def f_tr2(params, transforms, profiles, data, **kwargs):
     def fb_QS(nfp,N,iotas_omega):
         return jnp.ones(iotas_omega.shape)
     QS_factor = jax.lax.cond(QS_flag,tb_QS,fb_QS,nfp,N,iotas_omega)
-    omega_arr_test = QS_factor * tau_arr * (m_alpha/(Z*e)) * alpha_drift_out * v2[0] / (2*jnp.pi) # :=(rho,alpha,Bcrit,well)
+    omega_arr_test = QS_factor * tau_arr * ((0.5*m_alpha*v2[0])/(Z*e)) * alpha_drift_out / (2*jnp.pi) # :=(rho,alpha,Bcrit,well)
     # omega_arr = alpha_res * jnp.sum(omega_arr_test,axis=1) / (2*jnp.pi) # :=(rho,Bcrit,well), concern in this line about if there are values that don't have an Omega_eta in omega_arr, they will skew the results
     omega_arr = jnpmean_nz(omega_arr_test,axis=1,fill=11.0) # :=(rho,Bcrit,well), will return 11.0 only if there was not a single field line for this (rho,Bc,well) combination that had a non-0.0 value (extremely unlikely for something close to the zero resonance but will be true if not trapped at this combination)
 
@@ -745,10 +752,10 @@ def f_tr2(params, transforms, profiles, data, **kwargs):
     wd = wd_blur * softmax(domega_arr,alpha=50,axis=0) / 2 # := (Bcrit,well), wd really specifies the half-width of the bump function
 
     # Check if wd needs to be cropped if resolution or shear issues
-    wd_max = softmax(omega_arr,alpha=50,axis=0) # := (Bcrit,well)
-    wd_max = jnp.ones(wd_max.shape) * 0.0005 * wd_max # if all elements needed to be cropped
+    wd_max = softmax(jnp.where(omega_arr==11.0,0,omega_arr),alpha=50,axis=0) # := (Bcrit,well)
+    wd_max = jnp.ones(wd_max.shape) * 0.1 * wd_max # if all elements needed to be cropped
     wd_min = softmin(omega_arr,alpha=50,axis=0) # := (Bcrit,well)
-    wd_min = jnp.ones(wd_min.shape) * 0.0001 * wd_max # if all elements needed to be cropped
+    wd_min = jnp.ones(wd_min.shape) * 0.01 * wd_max # if all elements needed to be cropped
     wd = jnp.where(wd > wd_max,wd_max,wd) # limit max size of wd based on 10% of wd_max
     wd = jnp.where(wd < wd_min,wd_min,wd) # limit min size of wd based on 1% of wd_max
 
@@ -784,7 +791,7 @@ def f_tr2(params, transforms, profiles, data, **kwargs):
 
     ##### ISLAND WIDTH TERM #####
     # Sum psi_drift_out term over alpha
-    psi_drift_out = safediv( ((m_alpha*v2[0])/(Z*e)) * psi_a * psi_drift_out , safediv(2*jnp.pi,tau_arr) )**2
+    psi_drift_out = safediv( ((0.5*m_alpha*v2[0])/(Z*e)) * psi_drift_out , safediv(2*jnp.pi,tau_arr) )**2
     psi_drift_out = alpha_res * jnp.sum( psi_drift_out ,axis=1) # := (rho,Bcrit,well)
     psi_drift_out = jnp.broadcast_to(psi_drift_out[...,None],(omega_arr.shape[0], omega_arr.shape[1], omega_arr.shape[2], q_arr.shape[0])) # := (rho,Bcrit,well,res)
 
@@ -792,14 +799,14 @@ def f_tr2(params, transforms, profiles, data, **kwargs):
     q_broad = jnp.broadcast_to(q_arr[None,None,None,:], (omega_arr.shape[0], omega_arr.shape[1], omega_arr.shape[2], q_arr.shape[0])) # := (rho,Bcrit,well,res)
 
     # Calculate island width or modified island width
+    rhos_broad = jnp.broadcast_to(rhos[...,None,None,None],(omega_arr.shape[0], omega_arr.shape[1], omega_arr.shape[2], q_arr.shape[0])) # := (rho,Bcrit,well,res)
     if STAB_SACRIFICE:
-        Deltarho_4 = safediv(psi_drift_out , q_broad**2) # := (rho,Bcrit,well,res)
+        # Delta_s_4 = safediv(psi_drift_out , q_broad**2) # := (rho,Bcrit,well,res)
+        Delta_s_4 = safediv(4 * (rhos_broad**2) * psi_drift_out , (q_broad**2)) # := (rho,Bcrit,well,res)
     else:
         omega_prime = jnp.where(omega_arr == 11.0, 0 , jnp.gradient(omega_arr,rho_res,axis=0))# := (rho,Bcrit,well), omega_arr is :=(rho,Bcrit,well)
         omega_prime = jnp.broadcast_to(omega_prime[...,None],(omega_arr.shape[0], omega_arr.shape[1], omega_arr.shape[2], q_arr.shape[0])) # := (rho,Bcrit,well,res)
-        Deltarho_4 = safediv(psi_drift_out , omega_prime*(q_broad**2)) # := (rho,Bcrit,well,res)
-    rhos_broad = jnp.broadcast_to(rhos[...,None,None,None],(omega_arr.shape[0], omega_arr.shape[1], omega_arr.shape[2], q_arr.shape[0])) # := (rho,Bcrit,well,res)
-    Deltarho_4 = safediv(Deltarho_4,(psi_a**4)*(rhos_broad**3)) # one rhos_broad factor cancels with Jacobian
+        Delta_s_4 = safediv(4 * (rhos_broad**2) * psi_drift_out , omega_prime*(q_broad**2)) # := (rho,Bcrit,well,res)
 
     ##### WEIGHTING BASED ON PLASMA EDGE VICINITY #####
     if LOSS_FRAC_WEIGHT:
@@ -809,7 +816,7 @@ def f_tr2(params, transforms, profiles, data, **kwargs):
 
 
     ##### PHASE-SPACE AVERAGING #####
-    f = jnp.sum( rho_max * f_b * Deltarho_4 ,axis=-1) # := (rho,Bcrit,well)
+    f = jnp.sum( rho_max * f_b * Delta_s_4 ,axis=-1) # := (rho,Bcrit,well)
 
     # Sum over Bcrit
     f_tr2_out = jnp.broadcast_to(f[...,None],(ado_shape[0],ado_shape[2],ado_shape[3],ado_shape[1])) # := (rho,Bcrit,well,alpha)
@@ -823,7 +830,7 @@ def f_tr2(params, transforms, profiles, data, **kwargs):
     f_tr2_out = alpha_res * jnp.sum(f_tr2_out, axis=1) # := (rho,well)
 
     # Sum over rho
-    f_tr2_out = rho_res * jnp.sum(f_tr2_out, axis=0) # := (well)
+    f_tr2_out = rho_res * jnp.sum(rhos_broad * f_tr2_out, axis=0) # := (well)
 
     # Sum over wells
     f_tr2_out = jnp.sum(f_tr2_out,axis=0) # scalar
@@ -837,7 +844,7 @@ def f_tr2(params, transforms, profiles, data, **kwargs):
             'res_arr': res_arr,
             'pitch_inv': data['pitch_inv'],
             'p_res': data['Bcrit_res'],
-            'Deltarho_4': Deltarho_4,
+            'Delta_s_4': Delta_s_4,
             'Omega_prime': omega_prime,
             'wd': wd,
             'tau_arr': tau_arr,
