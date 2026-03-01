@@ -803,8 +803,14 @@ def f_tr2(params, transforms, profiles, data, **kwargs):
     if STAB_SACRIFICE:
         # Delta_s_4 = safediv(psi_drift_out , q_broad**2) # := (rho,Bcrit,well,res)
         Delta_s_4 = safediv(4 * (rhos_broad**2) * psi_drift_out , (q_broad**2)) # := (rho,Bcrit,well,res)
-    else:
-        omega_prime = jnp.where(omega_arr == 11.0, 0 , jnp.gradient(omega_arr,rho_res,axis=0))# := (rho,Bcrit,well), omega_arr is :=(rho,Bcrit,well)
+    else: # note omega_prime does not include the edges of the non-11.0 regions of omega_arr to complete a full derivative accuracy
+        def filter_wb(arr,filtval=11.0,axis=0): 
+            # Filter a value out of an array with the boundary about each filtered value also filtered
+            valid = arr != filtval
+            neighbor_valid = jnp.roll(valid, 1, axis=axis) & jnp.roll(valid, -1, axis=axis)
+            valid = valid & neighbor_valid
+            return valid
+        omega_prime = jnp.where( filter_wb(omega_arr,filtval=11.0,axis=0) , jnp.gradient(omega_arr,rho_res,axis=0), 0)# := (rho,Bcrit,well), omega_arr is :=(rho,Bcrit,well)
         omega_prime = jnp.broadcast_to(omega_prime[...,None],(omega_arr.shape[0], omega_arr.shape[1], omega_arr.shape[2], q_arr.shape[0])) # := (rho,Bcrit,well,res)
         Delta_s_4 = safediv(4 * (rhos_broad**2) * psi_drift_out , omega_prime*(q_broad**2)) # := (rho,Bcrit,well,res)
 
@@ -830,6 +836,7 @@ def f_tr2(params, transforms, profiles, data, **kwargs):
     f_tr2_out = alpha_res * jnp.sum(f_tr2_out, axis=1) # := (rho,well)
 
     # Sum over rho
+    rhos_broad = jnp.broadcast_to(rhos[...,None],(omega_arr.shape[0], omega_arr.shape[2])) # := (rho,,well)
     f_tr2_out = rho_res * jnp.sum(rhos_broad * f_tr2_out, axis=0) # := (well)
 
     # Sum over wells
