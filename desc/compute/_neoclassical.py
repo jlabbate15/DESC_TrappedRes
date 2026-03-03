@@ -555,7 +555,7 @@ def f_tr2(params, transforms, profiles, data, **kwargs):
     nfp = kwargs.get("nfp",None)
     KE_frac = kwargs.get("KE_frac",None)
     pitch_invs = kwargs.get("pitch_invs",None)
-    alpha_res = kwargs.get("alpha_res",None)
+    eta_res = kwargs.get("alpha_res",None) # is really eta res
     rho_res = kwargs.get("rho_res",None)
     Bcrit_res = kwargs.get("Bcrit_res",None)
     wd_blur = kwargs.get("wd_blur",1.25)
@@ -578,9 +578,10 @@ def f_tr2(params, transforms, profiles, data, **kwargs):
     bt_filter_flag = kwargs.get("bt_filter_flag",False)
     rt_filter_flag = kwargs.get("rt_filter_flag",True)
     STAB_SACRIFICE = kwargs.get("STAB_SACRIFICE",True)
-    QS_flag = kwargs.get("QS_flag",False) # True for QS (QA, QH configurations, not QI)
+    # QS_flag = kwargs.get("QS_flag",False) # True for QS (QA, QH configurations, not QI)
     LOSS_FRAC_WEIGHT = kwargs.get("LOSS_FRAC_WEIGHT",True)
     DEBUG = kwargs.get("DEBUG",False)
+    CONSERVATIVE_IW = kwargs.get("CONSERVATIVE_IW",False)
 
 
     # Setup energies
@@ -680,6 +681,7 @@ def f_tr2(params, transforms, profiles, data, **kwargs):
 
     Bcrit_res = data['Bcrit_res']
     pitch_invs = data['pitch_inv']
+    etas = jnp.linspace(0,2*jnp.pi,ado_shape[1]) # := (etas)
 
     
     # Setup array allocations
@@ -737,12 +739,17 @@ def f_tr2(params, transforms, profiles, data, **kwargs):
 
     # Omega eta calculation (currently for one energy only), average over alphas
     iotas_omega = jnp.broadcast_to(iotas[...,None,None,None],(iotas.shape[0], ado_shape[1], ado_shape[2], ado_shape[3]))
-    def tb_QS(nfp,N,iotas_omega):
-        return safediv(nfp , ((N*nfp)-iotas_omega))
-    def fb_QS(nfp,N,iotas_omega):
-        return jnp.ones(iotas_omega.shape)
-    QS_factor = jax.lax.cond(QS_flag,tb_QS,fb_QS,nfp,N,iotas_omega)
-    omega_arr_test = QS_factor * tau_arr * ((0.5*m_alpha*v2[0])/(Z*e)) * alpha_drift_out / (2*jnp.pi) # :=(rho,alpha,Bcrit,well)
+    omega_arr_test = tau_arr * ((0.5*m_alpha*v2[0])/(Z*e)) * alpha_drift_out / (2*jnp.pi) # :=(rho,alpha,Bcrit,well)
+    omega_arr_test = safediv(omega_arr_test * nfp , N*nfp - iotas_omega * M)
+    
+    # def tb_QS(nfp,N,iotas_omega):
+    #     return safediv(nfp , ((N*nfp)-iotas_omega))
+    # def fb_QS(nfp,N,iotas_omega):
+    #     return jnp.ones(iotas_omega.shape)
+    # QS_factor = jax.lax.cond(QS_flag,tb_QS,fb_QS,nfp,N,iotas_omega)
+    # omega_arr_test = QS_factor * tau_arr * ((0.5*m_alpha*v2[0])/(Z*e)) * alpha_drift_out / (2*jnp.pi) # :=(rho,alpha,Bcrit,well)
+
+    
     # omega_arr = alpha_res * jnp.sum(omega_arr_test,axis=1) / (2*jnp.pi) # :=(rho,Bcrit,well), concern in this line about if there are values that don't have an Omega_eta in omega_arr, they will skew the results
     omega_arr = jnpmean_nz(omega_arr_test,axis=1,fill=11.0) # :=(rho,Bcrit,well), will return 11.0 only if there was not a single field line for this (rho,Bc,well) combination that had a non-0.0 value (extremely unlikely for something close to the zero resonance but will be true if not trapped at this combination)
 
@@ -790,29 +797,56 @@ def f_tr2(params, transforms, profiles, data, **kwargs):
         
 
     ##### ISLAND WIDTH TERM #####
-    # Sum psi_drift_out term over alpha
-    psi_drift_out = safediv( ((0.5*m_alpha*v2[0])/(Z*e)) * psi_drift_out , safediv(2*jnp.pi,tau_arr) )**2
-    psi_drift_out = alpha_res * jnp.sum( psi_drift_out ,axis=1) # := (rho,Bcrit,well)
-    psi_drift_out = jnp.broadcast_to(psi_drift_out[...,None],(omega_arr.shape[0], omega_arr.shape[1], omega_arr.shape[2], q_arr.shape[0])) # := (rho,Bcrit,well,res)
+    if CONSERVATIVE_IW: # True if using conservative island width method
+        # Sum psi_drift_out term over alpha
+        psi_drift_out = safediv( ((0.5*m_alpha*v2[0])/(Z*e)) * psi_drift_out , safediv(2*jnp.pi,tau_arr) )**2
+        psi_drift_out = eta_res * jnp.sum( psi_drift_out ,axis=1) # := (rho,Bcrit,well)
+        psi_drift_out = jnp.broadcast_to(psi_drift_out[...,None],(omega_arr.shape[0], omega_arr.shape[1], omega_arr.shape[2], q_arr.shape[0])) # := (rho,Bcrit,well,res)
+    
+        # Create n array for island width - make 4D array with n values on axis=3
+        q_broad = jnp.broadcast_to(q_arr[None,None,None,:], (omega_arr.shape[0], omega_arr.shape[1], omega_arr.shape[2], q_arr.shape[0])) # := (rho,Bcrit,well,res)
+    
+        # Calculate island width or modified island width
+        rhos_broad = jnp.broadcast_to(rhos[...,None,None,None],(omega_arr.shape[0], omega_arr.shape[1], omega_arr.shape[2], q_arr.shape[0])) # := (rho,Bcrit,well,res)
+        if STAB_SACRIFICE:
+            # Delta_s_4 = safediv(psi_drift_out , q_broad**2) # := (rho,Bcrit,well,res)
+            Delta_s_4 = safediv(4 * (rhos_broad**2) * psi_drift_out , (q_broad**2)) # := (rho,Bcrit,well,res)
+        else: # note omega_prime does not include the edges of the non-11.0 regions of omega_arr to complete a full derivative accuracy
+            def filter_wb(arr,filtval=11.0,axis=0): 
+                # Filter a value out of an array with the boundary about each filtered value also filtered
+                valid = arr != filtval
+                neighbor_valid = jnp.roll(valid, 1, axis=axis) & jnp.roll(valid, -1, axis=axis)
+                valid = valid & neighbor_valid
+                return valid
+            omega_prime = jnp.where( filter_wb(omega_arr,filtval=11.0,axis=0) , jnp.gradient(omega_arr,rho_res,axis=0), 0)# := (rho,Bcrit,well), omega_arr is :=(rho,Bcrit,well)
+            omega_prime = jnp.broadcast_to(omega_prime[...,None],(omega_arr.shape[0], omega_arr.shape[1], omega_arr.shape[2], q_arr.shape[0])) # := (rho,Bcrit,well,res)
+            Delta_s_4 = safediv(4 * (rhos_broad**2) * psi_drift_out , omega_prime*(q_broad**2)) # := (rho,Bcrit,well,res)
+    else: # if using Fourier transform island width method
+        psi_drift_out = ((0.5*m_alpha*v2[0])/(Z*e)) * psi_drift_out * tau_arr  # := (rho,eta,Bcrit,well)
+        psi_drift_out = jnp.broadcast_to(psi_drift_out[...,None], (psi_drift_out.shape[0], psi_drift_out.shape[1], psi_drift_out.shape[2], psi_drift_out.shape[3], q_arr.shape[0])) # := (rho,eta,Bcrit,well,res)
 
-    # Create n array for island width - make 4D array with n values on axis=3
-    q_broad = jnp.broadcast_to(q_arr[None,None,None,:], (omega_arr.shape[0], omega_arr.shape[1], omega_arr.shape[2], q_arr.shape[0])) # := (rho,Bcrit,well,res)
+        q_broad = jnp.broadcast_to(q_arr[None,None,None,None,:], (psi_drift_out.shape[0], psi_drift_out.shape[1], psi_drift_out.shape[2], psi_drift_out.shape[3], q_arr.shape[0])) # := (rho,eta,Bcrit,well,res)
+        etas = jnp.broadcast_to(etas[None,:,None,None,None], (psi_drift_out.shape[0], psi_drift_out.shape[1], psi_drift_out.shape[2], psi_drift_out.shape[3], q_arr.shape[0])) # := (rho,eta,Bcrit,well,res)
+        
+        Hqc = eta_res * jnp.sum( psi_drift_out * jnp.cos(q_broad * etas) ,axis=1) / jnp.pi # := (rho,Bcrit,well,res)
+        Hqs = eta_res * jnp.sum( psi_drift_out * jnp.sin(q_broad * etas) ,axis=1) / jnp.pi # := (rho,Bcrit,well,res)
+        Hq2 = (0.5**2) * (Hqc**2 + Hqs**2) # factor of 4 will cancel out
 
-    # Calculate island width or modified island width
-    rhos_broad = jnp.broadcast_to(rhos[...,None,None,None],(omega_arr.shape[0], omega_arr.shape[1], omega_arr.shape[2], q_arr.shape[0])) # := (rho,Bcrit,well,res)
-    if STAB_SACRIFICE:
-        # Delta_s_4 = safediv(psi_drift_out , q_broad**2) # := (rho,Bcrit,well,res)
-        Delta_s_4 = safediv(4 * (rhos_broad**2) * psi_drift_out , (q_broad**2)) # := (rho,Bcrit,well,res)
-    else: # note omega_prime does not include the edges of the non-11.0 regions of omega_arr to complete a full derivative accuracy
-        def filter_wb(arr,filtval=11.0,axis=0): 
-            # Filter a value out of an array with the boundary about each filtered value also filtered
-            valid = arr != filtval
-            neighbor_valid = jnp.roll(valid, 1, axis=axis) & jnp.roll(valid, -1, axis=axis)
-            valid = valid & neighbor_valid
-            return valid
-        omega_prime = jnp.where( filter_wb(omega_arr,filtval=11.0,axis=0) , jnp.gradient(omega_arr,rho_res,axis=0), 0)# := (rho,Bcrit,well), omega_arr is :=(rho,Bcrit,well)
-        omega_prime = jnp.broadcast_to(omega_prime[...,None],(omega_arr.shape[0], omega_arr.shape[1], omega_arr.shape[2], q_arr.shape[0])) # := (rho,Bcrit,well,res)
-        Delta_s_4 = safediv(4 * (rhos_broad**2) * psi_drift_out , omega_prime*(q_broad**2)) # := (rho,Bcrit,well,res)
+        q_broad = jnp.broadcast_to(q_arr[None,None,None,:], (psi_drift_out.shape[0], psi_drift_out.shape[2], psi_drift_out.shape[3], q_arr.shape[0])) # := (rho,Bcrit,well,res)
+        rhos_broad = jnp.broadcast_to(rhos[...,None,None,None],(omega_arr.shape[0], omega_arr.shape[1], omega_arr.shape[2], q_arr.shape[0])) # := (rho,Bcrit,well,res)
+        if STAB_SACRIFICE:
+            Delta_s_4 = safediv(4 * (rhos_broad**2) * Hq2 , jnp.pi * (q_broad**2)) # := (rho,Bcrit,well,res)
+        else:
+            def filter_wb(arr,filtval=11.0,axis=0): 
+                # Filter a value out of an array with the boundary about each filtered value also filtered
+                valid = arr != filtval
+                neighbor_valid = jnp.roll(valid, 1, axis=axis) & jnp.roll(valid, -1, axis=axis)
+                valid = valid & neighbor_valid
+                return valid
+            omega_prime = jnp.where( filter_wb(omega_arr,filtval=11.0,axis=0) , jnp.gradient(omega_arr,rho_res,axis=0), 0)# := (rho,Bcrit,well), omega_arr is :=(rho,Bcrit,well)
+            omega_prime = jnp.broadcast_to(omega_prime[...,None],(omega_arr.shape[0], omega_arr.shape[1], omega_arr.shape[2], q_arr.shape[0])) # := (rho,Bcrit,well,res)
+            Delta_s_4 = safediv(4 * (rhos_broad**2) * Hq2 , (q_broad**2) * omega_prime**2 * jnp.pi**2) # := (rho,Bcrit,well,res), this is (Delta s)**4
+            
 
     ##### WEIGHTING BASED ON PLASMA EDGE VICINITY #####
     if LOSS_FRAC_WEIGHT:
@@ -833,7 +867,7 @@ def f_tr2(params, transforms, profiles, data, **kwargs):
     f_tr2_out = jnp.sum( safediv(Bcrit_res * f_tr2_out * tau_arr , pitch_invs**2) , axis=2 ) # := (rho,alpha,well)
 
     # Second sum over alpha
-    f_tr2_out = alpha_res * jnp.sum(f_tr2_out, axis=1) # := (rho,well)
+    f_tr2_out = eta_res * jnp.sum(f_tr2_out, axis=1) # := (rho,well)
 
     # Sum over rho
     rhos_broad = jnp.broadcast_to(rhos[...,None],(omega_arr.shape[0], omega_arr.shape[2])) # := (rho,,well)

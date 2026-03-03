@@ -9,7 +9,7 @@ from termcolor import colored
 from desc.backend import jnp
 from desc.compute import get_profiles, get_transforms
 from desc.compute.utils import _compute as compute_fun
-from desc.grid import LinearGrid
+from desc.grid import Grid, LinearGrid
 from desc.integrals._interp_utils import bijection_from_disc, cheb_pts, fourier_pts
 from desc.utils import parse_argname_change, setdefault
 
@@ -438,6 +438,95 @@ def _vander_dct_cfl(x, Y):
     return jnp.cos(jnp.arange(Y) * jnp.arccos(x)[:, jnp.newaxis])
 
 
+def _build_eta_grid(eq, rhos, alpha_per_rho, zeta, iotas, params):
+    """Build a DESC grid with per-rho alpha values derived from uniform eta.
+
+    Creates a meshgrid-like grid where each rho surface has its own alpha
+    values (computed from uniformly spaced eta), maps it to DESC (rho, theta,
+    zeta) coordinates, and returns the resulting grid with the original
+    (rho, alpha, zeta) grid stored as ``source_grid``.
+
+    Parameters
+    ----------
+    eq : Equilibrium
+    rhos : jnp.ndarray, shape (num_rho,)
+    alpha_per_rho : jnp.ndarray, shape (num_rho, num_eta)
+        Alpha values for each rho surface, derived from uniform eta.
+    zeta : jnp.ndarray, shape (num_zeta,)
+    iotas : jnp.ndarray, shape (num_rho,)
+    params : dict
+        Equilibrium parameters.
+
+    Returns
+    -------
+    grid : Grid
+        DESC grid in (rho, theta, zeta) with ``source_grid`` in (rho, alpha, zeta).
+    """
+    from desc.equilibrium.coords import map_coordinates
+
+    num_rho = len(rhos)
+    num_eta = alpha_per_rho.shape[1]
+    num_zeta = len(zeta)
+
+    # Build raz nodes in meshgrid order: alpha fastest, rho middle, zeta slowest
+    # (matching the Fortran-order layout used by Grid.create_meshgrid)
+    _, rr, zz = jnp.meshgrid(jnp.arange(num_eta), rhos, zeta, indexing="ij")
+    alpha_arr = jnp.broadcast_to(
+        alpha_per_rho.T[:, :, jnp.newaxis], (num_eta, num_rho, num_zeta)
+    )
+    raz_nodes = jnp.column_stack([
+        rr.flatten(order="F"),
+        alpha_arr.flatten(order="F"),
+        zz.flatten(order="F"),
+    ])
+
+    unique_rho_idx = jnp.arange(num_rho) * num_eta
+    unique_poloidal_idx = jnp.arange(num_eta)
+    unique_zeta_idx = jnp.arange(num_zeta) * num_rho * num_eta
+    inverse_rho_idx = jnp.tile(
+        jnp.repeat(jnp.arange(num_rho), num_eta), num_zeta
+    )
+    inverse_poloidal_idx = jnp.tile(jnp.arange(num_eta), num_rho * num_zeta)
+    inverse_zeta_idx = jnp.repeat(jnp.arange(num_zeta), num_rho * num_eta)
+
+    raz_grid = Grid(
+        nodes=raz_nodes,
+        coordinates="raz",
+        period=(jnp.inf, jnp.inf, jnp.inf),
+        sort=False,
+        is_meshgrid=True,
+        jitable=True,
+        _unique_rho_idx=unique_rho_idx,
+        _unique_poloidal_idx=unique_poloidal_idx,
+        _unique_zeta_idx=unique_zeta_idx,
+        _inverse_rho_idx=inverse_rho_idx,
+        _inverse_poloidal_idx=inverse_poloidal_idx,
+        _inverse_zeta_idx=inverse_zeta_idx,
+    )
+
+    iota_expanded = raz_grid.expand(jnp.atleast_1d(jnp.asarray(iotas)))
+    rtz_nodes = map_coordinates(
+        eq,
+        raz_grid.nodes,
+        inbasis=["rho", "alpha", "zeta"],
+        outbasis=("rho", "theta", "zeta"),
+        period=(jnp.inf, jnp.inf, jnp.inf),
+        iota=iota_expanded,
+        params=params,
+    )
+
+    desc_grid = Grid(
+        nodes=rtz_nodes,
+        coordinates="rtz",
+        source_grid=raz_grid,
+        sort=False,
+        jitable=True,
+        _unique_rho_idx=unique_rho_idx,
+        _inverse_rho_idx=inverse_rho_idx,
+    )
+    return desc_grid
+
+
 
 # New resonance objective from John Anthony Labbate
 class TrappedResonance(_Objective):
@@ -476,7 +565,8 @@ class TrappedResonance(_Objective):
         loss_function=None,
         deriv_mode="auto",
         rho=np.linspace(0.1, 0.9, 3),
-        alpha=np.linspace(0,2*np.pi,10),
+        # alpha=np.linspace(0,2*np.pi,10),
+        num_eta=10,
         KE_frac=np.array([1]), # currently only supporting one KE_frac
         *,
         num_transit=5,
@@ -491,7 +581,7 @@ class TrappedResonance(_Objective):
         jac_chunk_size=None,
         pitch_invs=None,
         N=0, # QA is default, not with nfp
-        QS_flag=True,
+        M=1, # QA is default
         m_max = 10,
         n_max = 5,
         res_range_min = -4,
@@ -502,6 +592,7 @@ class TrappedResonance(_Objective):
         STAB_SACRIFICE = True,
         LOSS_FRAC_WEIGHT = True,
         DEBUG = False,
+        CONSERVATIVE_IW = False,
         verbose = False,
         wd_blur = 1.25, # DeltaOmega
         pitch_batch_size = 1,
@@ -512,22 +603,24 @@ class TrappedResonance(_Objective):
         if target is None and bounds is None:
             target = 1e-8 # default target value
         self._grid = grid
-        rho, alpha = np.atleast_1d(rho, alpha)
+        # rho, alpha = np.atleast_1d(rho, alpha)
+        self._rho = np.atleast_1d(rho) if rho is not None else None
+        self._num_eta = int(num_eta)
         self._dim_f = rho.size
         self._constants = {
             "quad_weights": 1,
             "rho": rho,
-            "alpha": alpha,
+            # "alpha": alpha,
             "zeta": np.linspace(
                 0, 2 * np.pi * num_transit, knots_per_transit * num_transit
             )
         }
         # if pitch_invs is not None:
         #     num_pitch = len(pitch_invs)
-        if QS_flag: # QA or QH
-            M=1
-        else: # QI~QP
-            M=0
+        # if QS_flag: # QA or QH
+        #     M=1
+        # else: # QI~QP
+        #     M=0
         self._hyperparameters = {
             "num_quad": num_quad,
             "num_pitch": num_pitch,
@@ -536,7 +629,6 @@ class TrappedResonance(_Objective):
             "KE_frac": KE_frac,
             "pitch_invs": pitch_invs,
             "N": N,
-            "QS_flag": QS_flag,
             "m_max": m_max,
             "n_max": n_max,
             "res_range_min": res_range_min,
@@ -547,6 +639,7 @@ class TrappedResonance(_Objective):
             "STAB_SACRIFICE": STAB_SACRIFICE,
             "LOSS_FRAC_WEIGHT": LOSS_FRAC_WEIGHT,
             "DEBUG": DEBUG,
+            "CONSERVATIVE_IW": CONSERVATIVE_IW,
             "verbose": verbose,
             "wd_blur": wd_blur,
             'M': M,
@@ -558,7 +651,7 @@ class TrappedResonance(_Objective):
         self._keys_1dr = ["iota", "iota_r", "min_tz |B|", "max_tz |B|", "Psi"]
         self._key = "f_tr2"
         self._params2 = { # other non-static params       
-            "alpha_res": (alpha[-1]-alpha[0])/(len(alpha)-1),
+            "alpha_res": 2*np.pi/(self._num_eta-1),
             "rho_res": (rho[-1]-rho[0])/(len(rho)-1),
             # "Bcrit_res": (pitch_invs[-1]-pitch_invs[0])/(len(pitch_invs)-1),
             # "Psi": Psi,
@@ -692,14 +785,32 @@ class TrappedResonance(_Objective):
             constants["profiles"],
         )
         # TODO: interpolate all deps to this grid with fft utilities from fourier bounce
-        grid = eq._get_rtz_grid(
-            constants["rho"],
-            constants["alpha"],
-            constants["zeta"],
-            coordinates="raz",
-            iota=self._grid_1dr.compress(data["iota"]),
-            params=params,
-        )
+
+        # Build grid with per-rho alpha derived from uniformly spaced eta
+        iotas = self._grid_1dr.compress(data["iota"])
+        rhos = constants["rho"]
+        zeta = constants["zeta"]
+        num_eta = self._num_eta
+        nfp = eq.NFP
+        N_mode = self._hyperparameters["N"]
+        M_mode = self._hyperparameters["M"]
+
+        eta_vals = jnp.linspace(0, 2 * jnp.pi, num_eta, endpoint=False)
+        ft_denom = N_mode * nfp - iotas * M_mode
+        alpha_per_rho = eta_vals[None, :] * ft_denom[:, None] / nfp
+
+        grid = _build_eta_grid(eq, rhos, alpha_per_rho, zeta, iotas, params) # this gives an rtz grid with even spacing in eta (not necessarily even in theta) and the source_grid is raz (again even spacing in eta but not necessarily even spacing in alpha)
+
+        
+        # grid = eq._get_rtz_grid( # not using because we need a uniform eta grid
+        #     constants["rho"],
+        #     constants["alpha"],
+        #     constants["zeta"],
+        #     coordinates="raz",
+        #     iota=self._grid_1dr.compress(data["iota"]),
+        #     params=params,
+        # )
+        
         data = {
             key: grid.copy_data_from_other(data[key], self._grid_1dr)
             for key in self._keys_1dr
