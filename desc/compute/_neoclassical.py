@@ -512,6 +512,118 @@ def _radial_drift(data, B, pitch):
         2 * data["cvdrift0"] * (2 - pitch * B), jnp.sqrt(jnp.abs(1 - pitch * B))
     )
 
+def _Omega_prime_rho(Omega, rho_res):
+    # Omega'(rho) via finite differences
+
+    valid = Omega != 11.0 # set 1 for valid Omega, 0 for invalid
+    
+    Omega_prev_g = jnp.concatenate(
+        [jnp.full((1,) + Omega.shape[1:], 11.0), Omega[:-1]], axis=0
+    )
+    Omega_next_g = jnp.concatenate(
+        [Omega[1:], jnp.full((1,) + Omega.shape[1:], 11.0)], axis=0
+    )
+    valid_prev = jnp.concatenate(
+        [jnp.zeros((1,) + valid.shape[1:], dtype=bool), valid[:-1]], axis=0
+    )
+    valid_next = jnp.concatenate(
+        [valid[1:], jnp.zeros((1,) + valid.shape[1:], dtype=bool)], axis=0
+    )
+    grad_central = (Omega_next_g - Omega_prev_g) / (2 * rho_res)
+    grad_forward = (Omega_next_g - Omega) / rho_res
+    grad_backward = (Omega - Omega_prev_g) / rho_res
+    dOmega_drho = jnp.where(
+        valid & valid_prev & valid_next,
+        grad_central,
+        jnp.where(
+            valid & valid_next & ~valid_prev,
+            grad_forward,
+            jnp.where(
+                valid & valid_prev & ~valid_next,
+                grad_backward,
+                11.0,
+            ),
+        ),
+    )
+    return dOmega_drho
+
+
+def _phase_space_average(data, grid, f_res, pitch_inv, pitch_inv_weight, fl_length, N, M, nfp, iotas. ado_shape):
+    """Phase-space average of f_res.
+
+    Computes <f_res> = Σ_w ∫dα ∫dλ v·τ_b · f / (2 ∫dα ∫dl/B).
+    f_res is α-independent, so it is pulled out of the α integral.
+    Pitch quadrature uses Gauss-Legendre weights from
+    ``Bounce1D.get_pitch_inv_quad``, matching eps_eff / Gamma_c.
+
+    Parameters
+    ----------
+    vtau_out : jnp.ndarray, shape (rho, alpha, Bcrit, well)
+        Bounce integral of v·τ.
+    f_res : jnp.ndarray, shape (rho, Bcrit, well)
+        Objective function per (rho, pitch, well).
+    pitch_inv : jnp.ndarray, shape (rho, Bcrit)
+        Pitch inverse values.
+    pitch_inv_weight : jnp.ndarray, shape (rho, Bcrit)
+        Quadrature weights for pitch integration.
+    fl_length : jnp.ndarray, shape (rho,)
+        Mean-alpha fieldline length, i.e. mean_α ∫ dl/B.
+    iotas : jnp.ndarray, shape (rho,)
+
+    Returns
+    -------
+    f_res_avg : jnp.ndarray, shape (rho,)
+    """
+
+    ft_denom = N * nfp - iotas * M # := (rho)
+    sg_alpha_max = 2*jnp.pi * ft_denom / nfp
+    sg_alpha_min = jnp.zeros(len(sg_alpha_max))
+    alphas_vto = jnp.linspace(sg_alpha_min,sg_alpha_max,ado_shape[1])
+    rhos_vto = grid.nodes[grid.unique_rho_idx, 0] # := (rho)
+    zeta_arr = jnp.array([0.0])
+    R, A, Z = jnp.meshgrid(rho_arr, alpha_arr, zeta_arr, indexing="ij")
+    nodes_raz = jnp.vstack([R.flatten(), A.flatten(), Z.flatten()]).T
+    grid_vto = Grid(nodes=nodes_raz, coordinates="raz")
+    
+    def drifts_vtau(data):
+        bounce = Bounce1D(grid, data, quad, is_reshaped=True)
+        points = bounce.points(data["pitch_inv"], num_well=num_well)
+        return bounce.integrate(
+            [_v_tau],
+            data["pitch_inv"],
+            data,
+            [],
+            num_well=num_well,
+        )
+    vtau_newgrid = ( # *_drift_out := (rho,alpha,Bcrit,wells). Energy will be added in at some other time
+        _compute(
+            drifts_vtau, 
+            {},
+            data,
+            grid_vto,
+            pitch_inv.shape[1], # number of Bcrit
+            surf_batch_size, # avoid jax's vectorizing if set to 1 in the rho dimension
+            pitch_invs=pitch_invs,
+            pitch_method=0
+        )
+    )
+    
+    num_alpha = vtau_newgrid.shape[1]
+    integrand = vtau_newgrid * f_res[:, jnp.newaxis, :, :]
+    # 1. Integrate over pitch (per α, per well): ∫dλ g(λ) = ∫dp g(1/p)/p²
+    pitch_integrated = jnp.nansum(
+        integrand
+        * pitch_inv_weight[:, jnp.newaxis, :, jnp.newaxis]
+        / pitch_inv[:, jnp.newaxis, :, jnp.newaxis] ** 2,
+        axis=2,
+    )  # (rho, alpha, well)
+    # 2. Sum over α (discrete ∫dα)
+    alpha_summed = pitch_integrated.sum(axis=1)  # (rho, well)
+    # 3. Sum over wells
+    numerator = jnp.sum(alpha_summed, axis=-1)  # (rho,)
+    # Denominator: 2 · Σ_α ∫dl/B = 2 · N_α · mean_α(∫dl/B)
+    return safediv(numerator, 2 * num_alpha * fl_length)
+
 _bounce1D_doc = {
     "num_well": _bounce_doc["num_well"],
     "num_quad": _bounce_doc["num_quad"],
@@ -811,14 +923,8 @@ def f_tr2(params, transforms, profiles, data, **kwargs):
         if STAB_SACRIFICE:
             # Delta_s_4 = safediv(psi_drift_out , q_broad**2) # := (rho,Bcrit,well,res)
             Delta_s_4 = safediv(4 * (rhos_broad**2) * psi_drift_out , (q_broad**2)) # := (rho,Bcrit,well,res)
-        else: # note omega_prime does not include the edges of the non-11.0 regions of omega_arr to complete a full derivative accuracy
-            def filter_wb(arr,filtval=11.0,axis=0): 
-                # Filter a value out of an array with the boundary about each filtered value also filtered
-                valid = arr != filtval
-                neighbor_valid = jnp.roll(valid, 1, axis=axis) & jnp.roll(valid, -1, axis=axis)
-                valid = valid & neighbor_valid
-                return valid
-            omega_prime = jnp.where( filter_wb(omega_arr,filtval=11.0,axis=0) , jnp.gradient(omega_arr,rho_res,axis=0), 0)# := (rho,Bcrit,well), omega_arr is :=(rho,Bcrit,well)
+        else:
+            omega_prime = _Omega_prime_rho(omega_arr,rho_res) # := (rho,Bcrit,well), omega_arr is :=(rho,Bcrit,well)
             omega_prime = jnp.broadcast_to(omega_prime[...,None],(omega_arr.shape[0], omega_arr.shape[1], omega_arr.shape[2], q_arr.shape[0])) # := (rho,Bcrit,well,res)
             Delta_s_4 = safediv(4 * (rhos_broad**2) * psi_drift_out , omega_prime*(q_broad**2)) # := (rho,Bcrit,well,res)
     else: # if using Fourier transform island width method
@@ -837,13 +943,7 @@ def f_tr2(params, transforms, profiles, data, **kwargs):
         if STAB_SACRIFICE:
             Delta_s_4 = safediv(4 * (rhos_broad**2) * Hq2 , jnp.pi * (q_broad**2)) # := (rho,Bcrit,well,res)
         else:
-            def filter_wb(arr,filtval=11.0,axis=0): 
-                # Filter a value out of an array with the boundary about each filtered value also filtered
-                valid = arr != filtval
-                neighbor_valid = jnp.roll(valid, 1, axis=axis) & jnp.roll(valid, -1, axis=axis)
-                valid = valid & neighbor_valid
-                return valid
-            omega_prime = jnp.where( filter_wb(omega_arr,filtval=11.0,axis=0) , jnp.gradient(omega_arr,rho_res,axis=0), 0)# := (rho,Bcrit,well), omega_arr is :=(rho,Bcrit,well)
+            omega_prime = _Omega_prime_rho(omega_arr,rho_res)
             omega_prime = jnp.broadcast_to(omega_prime[...,None],(omega_arr.shape[0], omega_arr.shape[1], omega_arr.shape[2], q_arr.shape[0])) # := (rho,Bcrit,well,res)
             Delta_s_4 = safediv(4 * (rhos_broad**2) * Hq2 , (q_broad**2) * omega_prime**2 * jnp.pi**2) # := (rho,Bcrit,well,res), this is (Delta s)**4
             
