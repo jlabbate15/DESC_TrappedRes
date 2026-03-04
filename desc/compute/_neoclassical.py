@@ -23,6 +23,9 @@ from ..integrals.quad_utils import (
 )
 from ..integrals._bounce_utils import get_pitch_inv_quad
 from quadax import simpson
+from desc.grid import Grid
+
+from desc.compute._neoclassical import _build_eta_grid
 
 # from ._fast_ion import _v_tau
 
@@ -476,22 +479,23 @@ def _effective_ripple(params, transforms, profiles, data, **kwargs):
     name="<L|r,a>",
     label="\\int_{\\zeta_{\\mathrm{min}}}^{\\zeta_{\\mathrm{max}}}"
     " \\frac{d\\zeta}{|B^{\\zeta}|}",
-    units="m / T",
-    units_long="Meter / tesla",
+    units="m",
+    units_long="Meter",
     description="(Mean) proper length of field line(s)",
     dim=1,
     params=[],
     transforms={"grid": []},
     profiles=[],
     coordinates="r",
-    data=["B^zeta"],
+    data=["B^zeta","|B|"],
     resolution_requirement="z",
     source_grid_requirement={"coordinates": "raz", "is_meshgrid": True},
 )
 def _L_ra_fsa(data, transforms, profiles, **kwargs):
-    grid = transforms["grid"].source_grid
+    # grid = transforms["grid"].source_grid
+    grid = transforms["grid"]
     L_ra = simpson(
-        y=grid.meshgrid_reshape(1 / data["B^zeta"], "arz"),
+        y=grid.meshgrid_reshape(data["|B|"] / data["B^zeta"], "arz"),
         x=grid.compress(grid.nodes[:, 2], surface_label="zeta"),
         axis=-1,
     )
@@ -548,7 +552,7 @@ def _Omega_prime_rho(Omega, rho_res):
     return dOmega_drho
 
 
-def _phase_space_average(data, grid, f_res, pitch_inv, pitch_inv_weight, fl_length, N, M, nfp, iotas. ado_shape):
+def _phase_space_average(data, grid, f_res, num_eta, surf_batch_size, num_transit, knots_per_transit, quad, iotas):
     """Phase-space average of f_res.
 
     Computes <f_res> = Σ_w ∫dα ∫dλ v·τ_b · f / (2 ∫dα ∫dl/B).
@@ -564,7 +568,7 @@ def _phase_space_average(data, grid, f_res, pitch_inv, pitch_inv_weight, fl_leng
         Objective function per (rho, pitch, well).
     pitch_inv : jnp.ndarray, shape (rho, Bcrit)
         Pitch inverse values.
-    pitch_inv_weight : jnp.ndarray, shape (rho, Bcrit)
+    pitch_inv weight : jnp.ndarray, shape (rho, Bcrit)
         Quadrature weights for pitch integration.
     fl_length : jnp.ndarray, shape (rho,)
         Mean-alpha fieldline length, i.e. mean_α ∫ dl/B.
@@ -575,46 +579,54 @@ def _phase_space_average(data, grid, f_res, pitch_inv, pitch_inv_weight, fl_leng
     f_res_avg : jnp.ndarray, shape (rho,)
     """
 
-    ft_denom = N * nfp - iotas * M # := (rho)
-    sg_alpha_max = 2*jnp.pi * ft_denom / nfp
-    sg_alpha_min = jnp.zeros(len(sg_alpha_max))
-    alphas_vto = jnp.linspace(sg_alpha_min,sg_alpha_max,ado_shape[1])
-    rhos_vto = grid.nodes[grid.unique_rho_idx, 0] # := (rho)
-    zeta_arr = jnp.array([0.0])
-    R, A, Z = jnp.meshgrid(rho_arr, alpha_arr, zeta_arr, indexing="ij")
-    nodes_raz = jnp.vstack([R.flatten(), A.flatten(), Z.flatten()]).T
-    grid_vto = Grid(nodes=nodes_raz, coordinates="raz")
+    # ------- Create new grid to span whole space with alpha -------
+    rho_vto = grid.nodes[grid.unique_rho_idx, 0] # := (rho)
+    alpha_vto = jnp.linspace(0,2*jnp.pi,num_eta)
+    alpha_vto = jnp.broadcast_to(alpha_vto[None,...], (len(rho_vto),num_eta))
+    zeta_vto = jnp.linspace(0, 2 * jnp.pi * num_transit, knots_per_transit * num_transit)
+    # grid_vto = Grid.create_meshgrid([rho_vto, alpha_vto, zeta_vto], coordinates="raz")
+    # grid_vto = grid.meshgrid_reshape(grid_vto, "raz")
+    grid_vto = _build_eta_grid(eq, rhos, alpha_vto, zeta, iotas, params)
+
+    num_well = None
     
     def drifts_vtau(data):
         bounce = Bounce1D(grid, data, quad, is_reshaped=True)
         points = bounce.points(data["pitch_inv"], num_well=num_well)
-        return bounce.integrate(
+        out = bounce.integrate(
             [_v_tau],
             data["pitch_inv"],
             data,
             [],
             num_well=num_well,
         )
+        return out
     vtau_newgrid = ( # *_drift_out := (rho,alpha,Bcrit,wells). Energy will be added in at some other time
         _compute(
             drifts_vtau, 
             {},
             data,
             grid_vto,
-            pitch_inv.shape[1], # number of Bcrit
+            data["pitch_inv"].shape[1], # number of Bcrit
             surf_batch_size, # avoid jax's vectorizing if set to 1 in the rho dimension
-            pitch_invs=pitch_invs,
-            pitch_method=0
+            pitch_invs=data["pitch_inv"],
+            pitch_method=0 # pitch_method=0 uses original pitch inverse quadratures
         )
     )
+
+    fl_length = _L_ra_fsa(
+        data=data,
+        transforms={"grid": grid_vto},
+        profiles={}
+    )
+    fl_length = fl_length["<L|r,a>"] # := (rhos)
     
-    num_alpha = vtau_newgrid.shape[1]
-    integrand = vtau_newgrid * f_res[:, jnp.newaxis, :, :]
+    integrand = vtau_newgrid * f_res[:, jnp.newaxis, :, :] # vtau_newgrid fills in zeors for combinations without trapped particles
     # 1. Integrate over pitch (per α, per well): ∫dλ g(λ) = ∫dp g(1/p)/p²
-    pitch_integrated = jnp.nansum(
+    pitch_integrated = jnp.sum(
         integrand
-        * pitch_inv_weight[:, jnp.newaxis, :, jnp.newaxis]
-        / pitch_inv[:, jnp.newaxis, :, jnp.newaxis] ** 2,
+        * data["pitch_inv weight"][:, jnp.newaxis, :, jnp.newaxis]
+        / data["pitch_inv"][:, jnp.newaxis, :, jnp.newaxis] ** 2,
         axis=2,
     )  # (rho, alpha, well)
     # 2. Sum over α (discrete ∫dα)
@@ -622,7 +634,7 @@ def _phase_space_average(data, grid, f_res, pitch_inv, pitch_inv_weight, fl_leng
     # 3. Sum over wells
     numerator = jnp.sum(alpha_summed, axis=-1)  # (rho,)
     # Denominator: 2 · Σ_α ∫dl/B = 2 · N_α · mean_α(∫dl/B)
-    return safediv(numerator, 2 * num_alpha * fl_length)
+    return safediv(numerator, 2 * num_eta * fl_length)
 
 _bounce1D_doc = {
     "num_well": _bounce_doc["num_well"],
@@ -647,7 +659,7 @@ _bounce1D_doc = {
     transforms={"grid": []},
     profiles=[],
     coordinates="r",
-    data=["min_tz |B|", "max_tz |B|", "cvdrift0", "fieldline length", "gbdrift (periodic)", "cvdrift (periodic)"]
+    data=["min_tz |B|", "max_tz |B|", "cvdrift0", "B^zeta", "gbdrift (periodic)", "cvdrift (periodic)","|B|"]
     # data=["min_tz |B|", "max_tz |B|", "gbdrift", "fieldline length"]
     + Bounce1D.required_names,
     source_grid_requirement={"coordinates": "raz", "is_meshgrid": True},
@@ -675,6 +687,8 @@ def f_tr2(params, transforms, profiles, data, **kwargs):
     q_arr = kwargs.get("q_arr",None)
     pitch_method = kwargs.get("pitch_method",1)
     psi_a = data["Psi"][-1] # Total toroidal flux
+    num_transit = kwargs.get("num_transit",None)
+    knots_per_transit = kwargs.get("knots_per_transit",None)
 
     # Bounce integral parameters
     quad = kwargs.get("quad",None)
@@ -726,7 +740,7 @@ def f_tr2(params, transforms, profiles, data, **kwargs):
         _psi_drift = safediv(_psi_drift , v_tau) # safediv will take out NaNs
 
         return _alpha_drift, _psi_drift, points, v_tau, data
-    alpha_drift_out, psi_drift_out, points, vtau_out, data = ( # *_drift_out := (rho,alpha,Bcrit,wells). Energy will be added in at some other time
+    alpha_drift_out, psi_drift_out, points, vtau_out, _data = ( # *_drift_out := (rho,alpha,Bcrit,wells). Energy will be added in at some other time
         _compute(
             drifts, 
             {"cvdrift0": data["cvdrift0"],
@@ -740,6 +754,9 @@ def f_tr2(params, transforms, profiles, data, **kwargs):
             pitch_method=pitch_method # 1 for uniform pitch inverses across each surface
         )
     )
+    data["pitch_inv"] = _data["pitch_inv"]
+    data["Bcrit_res"] = Bcrit_res
+    data["pitch_inv weight"] = _data["pitch_inv weight"]
 
     # Use Bounce2D to evaluate bounce integrals (rho,alpha,Bcrit,well)
     # is the grid theta grid? how do I get it to be alpha? grid.compress() afterwards?
@@ -791,9 +808,9 @@ def f_tr2(params, transforms, profiles, data, **kwargs):
     assert alpha_drift_out.shape[:-1] == (grid.num_rho,grid.num_alpha,num_pitch) # don't know well number yet, default is None, and assert is useable in optimization
     ado_shape = jnp.shape(alpha_drift_out)
 
-    Bcrit_res = data['Bcrit_res']
-    pitch_invs = data['pitch_inv']
+    pitch_invs = _data['pitch_inv']
     etas = jnp.linspace(0,2*jnp.pi,ado_shape[1]) # := (etas)
+    num_eta = ado_shape[1]
 
     
     # Setup array allocations
@@ -954,8 +971,14 @@ def f_tr2(params, transforms, profiles, data, **kwargs):
     else:
         rho_max=1 # no weighting
 
+    
+    ##### OBJECTIVE FUNCTION #####
+    f_preavg = jnp.sum( rho_max * f_b * Delta_s_4 ,axis=-1) # := (rho,Bcrit,well)
 
+    
     ##### PHASE-SPACE AVERAGING #####
+    f_tr2_out = _phase_space_average(data, grid, f_preavg, num_eta, surf_batch_size, num_transit, knots_per_transit, quad)
+    ''' # old
     f = jnp.sum( rho_max * f_b * Delta_s_4 ,axis=-1) # := (rho,Bcrit,well)
 
     # Sum over Bcrit
@@ -975,12 +998,13 @@ def f_tr2(params, transforms, profiles, data, **kwargs):
 
     # Sum over wells
     f_tr2_out = jnp.sum(f_tr2_out,axis=0) # scalar
+    '''
 
     if DEBUG:
         data["f_tr2"] = { # for plotting/debugging
-            'omega_arr':omega_arr,
+            'omega_arr': omega_arr,
             'f_b': f_b,
-            'f_tr2_out':f_tr2_out,
+            'f_tr2_out': f_tr2_out,
             'rhos': rhos,
             'res_arr': res_arr,
             'pitch_inv': data['pitch_inv'],

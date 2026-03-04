@@ -646,9 +646,10 @@ class TrappedResonance(_Objective):
             'pitch_batch_size': pitch_batch_size,
             'surf_batch_size': surf_batch_size,
             'num_transit': num_transit,
-            'pitch_method': pitch_method
+            'pitch_method': pitch_method,
+            'knots_per_transit': knots_per_transit
         }
-        self._keys_1dr = ["iota", "iota_r", "min_tz |B|", "max_tz |B|", "Psi"]
+        self._keys_1dr = ["iota", "iota_r", "min_tz |B|", "max_tz |B|", "Psi", "B^zeta","|B|"]
         self._key = "f_tr2"
         self._params2 = { # other non-static params       
             "alpha_res": 2*np.pi/(self._num_eta-1),

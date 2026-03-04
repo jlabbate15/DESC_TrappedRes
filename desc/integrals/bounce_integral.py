@@ -1467,3 +1467,58 @@ class Bounce1D(Bounce):
             PPoly(B.T, self._zeta), **_set_default_plot_kwargs(kwargs, l, m)
         )
         return fig, ax
+
+    def compute_fieldline_length(self, quad=None, vander=None):
+        """Compute the (mean) proper length of the field line ∫ dℓ / B.
+
+        Computes mean_A ∫ dℓ / B where A is the set of field line labels
+        given when making this object.
+
+        Parameters
+        ----------
+        quad : tuple[jnp.ndarray]
+            Quadrature points xₖ and weights wₖ for the
+            approximate evaluation of the integral ∫₋₁¹ f(x) dx ≈ ∑ₖ wₖ f(xₖ).
+            Default is Gauss-Legendre quadrature at resolution ``Y_B//2``
+            on each toroidal transit.
+        vander : dict[str,jnp.ndarray]
+            Optional precomputed Vandermonde matrices for interpolation.
+
+        Returns
+        -------
+        length : jnp.ndarray
+            Shape (num rho, ).
+
+        """
+        if quad is None:
+            # Integrating an analytic oscillatory map so a high order quadrature
+            # is ideal. Difficult to pick the right frequency for Filon quadrature
+            # in general, which would work best at high NFP. Gauss-Legendre is
+            # superior to Clenshaw-Curtis for smooth oscillatory maps. Prolate
+            # spheroidal wave function quadrature would be an improvement.
+            deg = (
+                self._c["B(z)"].Y
+                if isinstance(self._c["B(z)"], PiecewiseChebyshevSeries)
+                else (self._c["knots"].size // self._c["T(z)"].X)
+            )
+            quad = leggauss(deg // 2)
+        x, w = quad
+        vander = setdefault(vander, {})
+
+        B_sup_zeta = irfft_mmt(
+            idct_mmt(
+                x,
+                self._c["T(z)"].cheb[..., None, :],
+                vander=vander.get("dct cfl", None),
+            ),
+            self._partial_sum_cfl(x, vander.get("dft cfl", None)),
+            self._num_theta,
+            _modes=self._m_modes,
+        )
+
+        # B⋅∇ζ never vanishes, so it has the same sign over a surface.
+        # Simple mean over α because when ζ extends beyond one transit we need
+        # to weight all field lines uniformly regardless of their area wrt α.
+        dz_dx = jnp.pi
+        return jnp.abs(jnp.reciprocal(B_sup_zeta).dot(w).sum(-1).mean(-1)) * dz_dx
+
