@@ -25,8 +25,6 @@ from ..integrals._bounce_utils import get_pitch_inv_quad
 from quadax import simpson
 from desc.grid import Grid
 
-from desc.compute._neoclassical import _build_eta_grid
-
 # from ._fast_ion import _v_tau
 
 
@@ -552,7 +550,7 @@ def _Omega_prime_rho(Omega, rho_res):
     return dOmega_drho
 
 
-def _phase_space_average(data, grid, f_res, num_eta, surf_batch_size, num_transit, knots_per_transit, quad, iotas):
+def _phase_space_average(data, grid, f_res, num_eta, surf_batch_size, num_transit, knots_per_transit, quad, iotas, num_well=None):
     """Phase-space average of f_res.
 
     Computes <f_res> = Σ_w ∫dα ∫dλ v·τ_b · f / (2 ∫dα ∫dl/B).
@@ -578,17 +576,6 @@ def _phase_space_average(data, grid, f_res, num_eta, surf_batch_size, num_transi
     -------
     f_res_avg : jnp.ndarray, shape (rho,)
     """
-
-    # ------- Create new grid to span whole space with alpha -------
-    rho_vto = grid.nodes[grid.unique_rho_idx, 0] # := (rho)
-    alpha_vto = jnp.linspace(0,2*jnp.pi,num_eta)
-    alpha_vto = jnp.broadcast_to(alpha_vto[None,...], (len(rho_vto),num_eta))
-    zeta_vto = jnp.linspace(0, 2 * jnp.pi * num_transit, knots_per_transit * num_transit)
-    # grid_vto = Grid.create_meshgrid([rho_vto, alpha_vto, zeta_vto], coordinates="raz")
-    # grid_vto = grid.meshgrid_reshape(grid_vto, "raz")
-    grid_vto = _build_eta_grid(eq, rhos, alpha_vto, zeta, iotas, params)
-
-    num_well = None
     
     def drifts_vtau(data):
         bounce = Bounce1D(grid, data, quad, is_reshaped=True)
@@ -755,8 +742,9 @@ def f_tr2(params, transforms, profiles, data, **kwargs):
         )
     )
     data["pitch_inv"] = _data["pitch_inv"]
-    data["Bcrit_res"] = Bcrit_res
-    data["pitch_inv weight"] = _data["pitch_inv weight"]
+    # data["Bcrit_res"] = Bcrit_res
+    if pitch_method == 0:
+        data["pitch_inv weight"] = _data["pitch_inv weight"]
 
     # Use Bounce2D to evaluate bounce integrals (rho,alpha,Bcrit,well)
     # is the grid theta grid? how do I get it to be alpha? grid.compress() afterwards?
@@ -974,7 +962,7 @@ def f_tr2(params, transforms, profiles, data, **kwargs):
     
     ##### OBJECTIVE FUNCTION #####
     f_preavg = jnp.sum( rho_max * f_b * Delta_s_4 ,axis=-1) # := (rho,Bcrit,well)
-
+    # f_tr2_out = f_preavg
     
     ##### PHASE-SPACE AVERAGING #####
     f_tr2_out = _phase_space_average(data, grid, f_preavg, num_eta, surf_batch_size, num_transit, knots_per_transit, quad)
@@ -1008,14 +996,15 @@ def f_tr2(params, transforms, profiles, data, **kwargs):
             'rhos': rhos,
             'res_arr': res_arr,
             'pitch_inv': data['pitch_inv'],
-            'p_res': data['Bcrit_res'],
+            # 'p_res': data['Bcrit_res'],
             'Delta_s_4': Delta_s_4,
             'Omega_prime': omega_prime,
             'wd': wd,
             'tau_arr': tau_arr,
             'psi_drift_out': psi_drift_out,
             'psi_a': psi_a,
-            'q_arr': q_arr
+            'q_arr': q_arr,
+            'points': points
             }
     else:
         data["f_tr2"] = f_tr2_out # full output
