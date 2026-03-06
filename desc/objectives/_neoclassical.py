@@ -610,7 +610,7 @@ class TrappedResonance(_Objective):
         self._constants = {
             "quad_weights": 1,
             "rho": rho,
-            # "alpha": alpha,
+            "alpha": np.linspace(0, 2*np.pi, num_eta),
             "zeta": np.linspace(
                 0, 2 * np.pi * num_transit, knots_per_transit * num_transit
             )
@@ -804,14 +804,14 @@ class TrappedResonance(_Objective):
         grid = _build_eta_grid(eq, rhos, alpha_per_rho, zeta, iotas, params) # this gives an rtz grid with even spacing in eta (not necessarily even in theta) and the source_grid is raz (again even spacing in eta but not necessarily even spacing in alpha)
 
         
-        # grid = eq._get_rtz_grid( # not using because we need a uniform eta grid
-        #     constants["rho"],
-        #     constants["alpha"],
-        #     constants["zeta"],
-        #     coordinates="raz",
-        #     iota=self._grid_1dr.compress(data["iota"]),
-        #     params=params,
-        # )
+        grid_psa = eq._get_rtz_grid( # grid uniform in alpha
+            constants["rho"],
+            constants["alpha"],
+            constants["zeta"],
+            coordinates="raz",
+            iota=self._grid_1dr.compress(data["iota"]),
+            params=params,
+        )
         
         data = {
             key: grid.copy_data_from_other(data[key], self._grid_1dr)
@@ -820,6 +820,7 @@ class TrappedResonance(_Objective):
         quad2 = {}
         if "quad2" in constants:
             quad2["quad2"] = constants["quad2"]
+        data["grid_psa"] = grid_psa
 
         data = compute_fun(
             eq,

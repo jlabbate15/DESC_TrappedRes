@@ -550,7 +550,7 @@ def _Omega_prime_rho(Omega, rho_res):
     return dOmega_drho
 
 
-def _phase_space_average(data, grid, f_res, num_eta, surf_batch_size, num_transit, knots_per_transit, quad, iotas, num_well=None):
+def _phase_space_average(data, f_res, num_eta, surf_batch_size, quad, fl_length, num_well=None):
     """Phase-space average of f_res.
 
     Computes <f_res> = Σ_w ∫dα ∫dλ v·τ_b · f / (2 ∫dα ∫dl/B).
@@ -576,9 +576,11 @@ def _phase_space_average(data, grid, f_res, num_eta, surf_batch_size, num_transi
     -------
     f_res_avg : jnp.ndarray, shape (rho,)
     """
+
+    grid_psa = data["grid_psa"].source_grid
     
     def drifts_vtau(data):
-        bounce = Bounce1D(grid, data, quad, is_reshaped=True)
+        bounce = Bounce1D(grid_psa, data, quad, is_reshaped=True)
         points = bounce.points(data["pitch_inv"], num_well=num_well)
         out = bounce.integrate(
             [_v_tau],
@@ -593,7 +595,7 @@ def _phase_space_average(data, grid, f_res, num_eta, surf_batch_size, num_transi
             drifts_vtau, 
             {},
             data,
-            grid_vto,
+            grid_psa,
             data["pitch_inv"].shape[1], # number of Bcrit
             surf_batch_size, # avoid jax's vectorizing if set to 1 in the rho dimension
             pitch_invs=data["pitch_inv"],
@@ -601,12 +603,11 @@ def _phase_space_average(data, grid, f_res, num_eta, surf_batch_size, num_transi
         )
     )
 
-    fl_length = _L_ra_fsa(
-        data=data,
-        transforms={"grid": grid_vto},
-        profiles={}
-    )
-    fl_length = fl_length["<L|r,a>"] # := (rhos)
+    # fl_length = _L_ra_fsa(
+    #     data=data,
+    #     transforms={"grid": grid_vto},
+    # )
+    # fl_length = fl_length["<L|r,a>"] # := (rhos)
     
     integrand = vtau_newgrid * f_res[:, jnp.newaxis, :, :] # vtau_newgrid fills in zeors for combinations without trapped particles
     # 1. Integrate over pitch (per α, per well): ∫dλ g(λ) = ∫dp g(1/p)/p²
@@ -621,7 +622,7 @@ def _phase_space_average(data, grid, f_res, num_eta, surf_batch_size, num_transi
     # 3. Sum over wells
     numerator = jnp.sum(alpha_summed, axis=-1)  # (rho,)
     # Denominator: 2 · Σ_α ∫dl/B = 2 · N_α · mean_α(∫dl/B)
-    return safediv(numerator, 2 * num_eta * fl_length)
+    return safediv(numerator, 2 * num_eta * grid_psa.compress(fl_length))
 
 _bounce1D_doc = {
     "num_well": _bounce_doc["num_well"],
@@ -646,8 +647,10 @@ _bounce1D_doc = {
     transforms={"grid": []},
     profiles=[],
     coordinates="r",
-    data=["min_tz |B|", "max_tz |B|", "cvdrift0", "B^zeta", "gbdrift (periodic)", "cvdrift (periodic)","|B|"]
+    # data=["min_tz |B|", "max_tz |B|", "cvdrift0", "B^zeta", "gbdrift (periodic)", "cvdrift (periodic)","|B|"]
     # data=["min_tz |B|", "max_tz |B|", "gbdrift", "fieldline length"]
+    data=["iota", "min_tz |B|", "max_tz |B|", "cvdrift0", "gbdrift", "fieldline length",
+          "gbdrift (periodic)", "cvdrift (periodic)"]
     + Bounce1D.required_names,
     source_grid_requirement={"coordinates": "raz", "is_meshgrid": True},
     public=False,
@@ -965,7 +968,7 @@ def f_tr2(params, transforms, profiles, data, **kwargs):
     # f_tr2_out = f_preavg
     
     ##### PHASE-SPACE AVERAGING #####
-    f_tr2_out = _phase_space_average(data, grid, f_preavg, num_eta, surf_batch_size, num_transit, knots_per_transit, quad)
+    f_tr2_out = _phase_space_average(data, f_preavg, num_eta, surf_batch_size, quad, data['fieldline length'])
     ''' # old
     f = jnp.sum( rho_max * f_b * Delta_s_4 ,axis=-1) # := (rho,Bcrit,well)
 
