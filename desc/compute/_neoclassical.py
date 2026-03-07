@@ -603,12 +603,6 @@ def _phase_space_average(data, f_res, num_eta, surf_batch_size, quad, fl_length,
         )
     )
 
-    # fl_length = _L_ra_fsa(
-    #     data=data,
-    #     transforms={"grid": grid_vto},
-    # )
-    # fl_length = fl_length["<L|r,a>"] # := (rhos)
-    
     integrand = vtau_newgrid * f_res[:, jnp.newaxis, :, :] # vtau_newgrid fills in zeors for combinations without trapped particles
     # 1. Integrate over pitch (per α, per well): ∫dλ g(λ) = ∫dp g(1/p)/p²
     pitch_integrated = jnp.sum(
@@ -965,11 +959,16 @@ def f_tr2(params, transforms, profiles, data, **kwargs):
     
     ##### OBJECTIVE FUNCTION #####
     f_preavg = jnp.sum( rho_max * f_b * Delta_s_4 ,axis=-1) # := (rho,Bcrit,well)
-    # f_tr2_out = f_preavg
+    f_tr2_out = f_preavg
     
     ##### PHASE-SPACE AVERAGING #####
+    '''
+    f_preavg = jnp.ones(f_preavg.shape) # testing phase-space averaging
     f_tr2_out = _phase_space_average(data, f_preavg, num_eta, surf_batch_size, quad, data['fieldline length'])
+    '''
+    
     ''' # old
+    # old
     f = jnp.sum( rho_max * f_b * Delta_s_4 ,axis=-1) # := (rho,Bcrit,well)
 
     # Sum over Bcrit
